@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔊 Sound Management
+#  Sound Managemen
 
 **Sistema web para la gestión integral de alquiler de equipos de sonido**
 
@@ -16,7 +16,7 @@
 
 ---
 
-## 🧰 Stack
+##  Stack
 
 | Backend | Frontend | Base de datos | Reportes | Infraestructura |
 |:---:|:---:|:---:|:---:|:---:|
@@ -24,26 +24,26 @@
 
 ---
 
-## 📋 Descripción
+##  Descripción
 
 Sound Management administra el negocio de alquiler de equipos de sonido: inventario de equipos, reservas y alquileres, ventas, compras a proveedores, roles y permisos del personal, auditoría y un portal donde cada cliente se registra y consulta su información.
 
 ---
 
-## ⚙️ Requisitos
+##  Requisitos
 
 | Herramienta | Versión |
 |---|---|
-| 🐘 PHP | 8.3 o superior (extensiones `pdo_mysql`, `mbstring`, `intl`, `gd`, `zip`, `fileinfo`, `openssl`) |
-| 📦 Composer | 2.x |
-| 🗄️ MySQL | 8.x |
-| 🔧 Git | Cualquier versión reciente |
+|  PHP | 8.3 o superior (extensiones `pdo_mysql`, `mbstring`, `intl`, `gd`, `zip`, `fileinfo`, `openssl`) |
+|  Composer | 2.x |
+|  MySQL | 8.x |
+|  Git | Cualquier versión reciente |
 
 > Crea una base de datos vacía `sound_management_db`, copia `.env.example` a `.env` y coloca tus credenciales de MySQL.
 
 ---
 
-## 🚀 Levantar el sistema
+##  Levantar el sistema
 
 ```bash
 composer setup && php artisan db:seed && php artisan sound:crear-administrador
@@ -55,4 +55,4 @@ composer dev
 
 | Servicio | URL |
 |---|---|
-| 🔊 Web | http://localhost:8000 |
+|  Web | http://localhost:8000 |
