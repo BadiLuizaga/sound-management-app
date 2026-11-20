@@ -1,0 +1,50 @@
+-- Sound Management — usuario MySQL de SOLO LECTURA para los reportes con IA.
+-- Ejecutar como root DESPUÉS de las migraciones, reemplazando la contraseña.
+-- Copia este archivo sin la extensión .example si lo vas a editar: los .sql
+-- reales están excluidos de Git (.gitignore).
+--
+--   docker compose exec -T db mysql -uroot -p < docker/mysql/reports-user.sql
+--
+-- Luego en .env:  DB_REPORTS_USERNAME=sound_reports  DB_REPORTS_PASSWORD=...
+
+CREATE USER IF NOT EXISTS 'sound_reports'@'%' IDENTIFIED BY 'CAMBIAR_POR_UNA_CLAVE_LARGA_Y_UNICA';
+
+-- Solo SELECT y solo sobre tablas de negocio. Nunca: usuario completo,
+-- sessions, users, password_reset_tokens, cache*, jobs*, failed_jobs,
+-- migrations, pagos_externos, carritos.
+GRANT SELECT ON sound_management_db.producto                         TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.marca                            TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.categoria                        TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.color                            TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.medida                           TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.volumen                          TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.empleado                         TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.cliente                          TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.rol                              TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.estadorol                        TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.metodopago                       TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.notaventa                        TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.detallenotaventa                 TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.notacompra                       TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.detallenotacompra                TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.proveedor                        TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.bitacoras                        TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.cajas                            TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.maquinarias                      TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.alquileres                       TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.alquiler_detalles                TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.mantenimientos                   TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.devoluciones                     TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.devolucion_detalles              TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.pedidos_reabastecimiento         TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.pedido_reabastecimiento_detalles TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.promociones                      TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.promocion_productos              TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.cotizaciones                     TO 'sound_reports'@'%';
+GRANT SELECT ON sound_management_db.cotizacion_detalles              TO 'sound_reports'@'%';
+
+-- Tabla usuario: solo columnas no sensibles (sin password ni remember_token)
+GRANT SELECT (ci, nombre, apellido, telefono, sexo, email, domicilio, tipoPersona)
+    ON sound_management_db.usuario TO 'sound_reports'@'%';
+
+FLUSH PRIVILEGES;
