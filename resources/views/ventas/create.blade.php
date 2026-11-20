@@ -133,6 +133,23 @@
                 </select>
             </div>
 
+            <!-- Datos del cobro según el método (Etapa 2) -->
+            <div x-show="codigoMetodo() === 'EFECTIVO'" style="margin-bottom: 16px;">
+                <label style="display: block; font-size: 0.8rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">Efectivo recibido (BOB)</label>
+                <input type="number" step="0.01" min="0" x-model="efectivoRecibido" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1;">
+                <p style="font-size: 0.85rem; color: #64748b; margin-top: 6px;" x-show="efectivoRecibido !== ''">
+                    Cambio: <strong x-text="Math.max(0, (parseFloat(efectivoRecibido || 0) - calcularTotalGeneral())).toFixed(2) + ' BOB'"></strong>
+                </p>
+            </div>
+            <div x-show="requiereReferencia()" style="margin-bottom: 16px;">
+                <label style="display: block; font-size: 0.8rem; font-weight: 600; color: #64748b; margin-bottom: 8px;"
+                       x-text="codigoMetodo() === 'TARJETA' ? 'N.º de autorización / voucher (obligatorio)' : 'Referencia bancaria de la operación (obligatoria)'"></label>
+                <input type="text" maxlength="100" x-model="referencia" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1;">
+                <p x-show="codigoMetodo() === 'TRANSFERENCIA' || codigoMetodo() === 'QR'" style="font-size: 0.8rem; color: #92400E; margin-top: 6px;">
+                    El cobro quedará pendiente de verificación; la venta se confirmará cuando un administrador o encargado verifique el ingreso.
+                </p>
+            </div>
+
             <!-- Resumen numérico -->
             <div style="border-top: 1px solid #f1f5f9; padding-top: 16px; display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px;">
                 <div style="display: flex; justify-content: space-between; font-size: 0.9rem; color: #64748b;">
@@ -225,6 +242,18 @@
             buscarCi: '',
             cliente: null,
             metodoPagoId: @json((string) ($metodosPago->first()->id ?? '')), // primer método activo, nunca un ID fijo
+            metodos: @json($metodosPago->map(fn ($m) => ['id' => (string) $m->id, 'codigo' => $m->codigo])->values()),
+            referencia: '',
+            efectivoRecibido: '',
+            // Una clave por intento de cobro: un doble envío no duplica el pago
+            claveCobro: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(16).slice(2) + '-pos'),
+            codigoMetodo() {
+                const m = this.metodos.find(x => x.id === String(this.metodoPagoId));
+                return m ? m.codigo : null;
+            },
+            requiereReferencia() {
+                return ['TARJETA', 'TRANSFERENCIA', 'QR'].includes(this.codigoMetodo());
+            },
             carrito: [],
             cargandoCliente: false,
             procesandoVenta: false,
@@ -416,11 +445,23 @@
                     return;
                 }
 
+                if (this.requiereReferencia() && this.referencia.trim() === '') {
+                    showToast('La referencia de la operación es obligatoria para este método de pago.', 'error');
+                    return;
+                }
+                if (this.codigoMetodo() === 'EFECTIVO' && parseFloat(this.efectivoRecibido || 0) < this.calcularTotalGeneral()) {
+                    showToast('El efectivo recibido es menor que el total.', 'error');
+                    return;
+                }
+
                 this.procesandoVenta = true;
 
                 const payload = {
                     ci_cliente: this.cliente.ci,
                     id_pago: this.metodoPagoId,
+                    referencia: this.requiereReferencia() ? this.referencia.trim() : null,
+                    efectivo_recibido: this.codigoMetodo() === 'EFECTIVO' ? this.efectivoRecibido : null,
+                    clave_idempotencia: this.claveCobro,
                     productos: this.carrito.map(item => ({
                         id: item.id,
                         cantidad: item.cantidad,
@@ -428,29 +469,38 @@
                     }))
                 };
 
+                const reiniciar = () => {
+                    this.carrito = [];
+                    this.cliente = null;
+                    this.buscarCi = '';
+                    this.referencia = '';
+                    this.efectivoRecibido = '';
+                    this.metodoPagoId = this.metodos.length ? this.metodos[0].id : '';
+                    this.claveCobro = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(16).slice(2) + '-pos');
+                };
+
                 fetch('/ventas', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
+                        'Accept': 'application/json',
                         'X-CSRF-TOKEN': '{{ csrf_token() }}'
                     },
                     body: JSON.stringify(payload)
                 })
                 .then(response => response.json())
                 .then(data => {
-                    if (data.success) {
-                        showToast('¡Venta realizada con éxito!');
-                        
+                    if (data.success && data.pendiente) {
+                        showToast(data.message);
+                        setTimeout(reiniciar, 1000);
+                    } else if (data.success) {
+                        showToast(data.cambio ? ('¡Venta realizada! Cambio: ' + data.cambio + ' BOB') : '¡Venta realizada con éxito!');
+
                         // Descargar el comprobante PDF inmediatamente
                         window.location.href = `/ventas/comprobante/${data.nro_factura}`;
 
                         // Limpiar formulario tras 1 segundo
-                        setTimeout(() => {
-                            this.carrito = [];
-                            this.cliente = null;
-                            this.buscarCi = '';
-                            this.metodoPagoId = '1';
-                        }, 1000);
+                        setTimeout(reiniciar, 1000);
                     } else {
                         showToast(data.message || 'Error al procesar la venta.', 'error');
                     }

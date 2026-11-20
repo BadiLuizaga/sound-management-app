@@ -4,5 +4,6 @@
     "Sales": true,
     "Rentals": true,
     "Procurement": true,
-    "Audit": true
+    "Audit": true,
+    "Finance": true
 }

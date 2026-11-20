@@ -15,9 +15,7 @@ use Modules\Audit\Models\Bitacora;
 use Modules\Access\Models\Cliente;
 use Modules\Sales\Models\Cotizacion;
 use Modules\Sales\Models\CotizacionDetalle;
-use Modules\Sales\Models\PagoExterno;
 use Modules\Sales\Models\MetodoPago;
-use Modules\Sales\Services\PayPalOrderVerifier;
 
 class CartController extends Controller
 {
@@ -89,10 +87,26 @@ class CartController extends Controller
         $totalDiscount = collect($discounts)->sum('monto');
         $totalConDescuento = max(0, $total - $totalDiscount);
 
-        // El botón de pago en línea solo se ofrece si el método PAYPAL existe y está activo
-        $pagoEnLineaDisponible = MetodoPago::disponible(MetodoPago::PAYPAL);
+        // Pago en línea (módulo Finance): solo se ofrece si PayPal está configurado
+        // (client_id + secret + webhook_id), el método PAYPAL está activo y hay
+        // tipo de cambio del día. El importe en USD es informativo: el servidor
+        // lo recalcula al crear la orden.
+        $disponibilidad = app(\Modules\Finance\Services\PagoService::class)->disponibilidadEnLinea();
+        $pagoEnLineaDisponible = $disponibilidad['disponible'];
+        $pagoEnLinea = null;
+        if ($pagoEnLineaDisponible && $totalConDescuento > 0) {
+            $bob = \Modules\Finance\Support\Dinero::deDecimal((string) round($totalConDescuento, 2), 'BOB');
+            $pagoEnLinea = [
+                'monto_bob' => $bob->decimal(),
+                'monto_proveedor' => app(\Modules\Finance\Services\TipoCambioService::class)->convertir($bob, $disponibilidad['tasa'])->decimal(),
+                'moneda_proveedor' => $disponibilidad['tasa']->moneda_base,
+                'tasa' => (string) $disponibilidad['tasa']->tasa,
+                'fecha_tasa' => $disponibilidad['tasa']->fecha_aplicacion->format('d/m/Y'),
+            ];
+        }
+        $motivoPagoNoDisponible = $disponibilidad['motivo'];
 
-        return view('carrito.index', compact('cartItems', 'total', 'discounts', 'totalDiscount', 'totalConDescuento', 'pagoEnLineaDisponible'));
+        return view('carrito.index', compact('cartItems', 'total', 'discounts', 'totalDiscount', 'totalConDescuento', 'pagoEnLineaDisponible', 'pagoEnLinea', 'motivoPagoNoDisponible'));
     }
 
     public function add(Request $request)
@@ -296,205 +310,14 @@ class CartController extends Controller
     }
 
     /**
-     * Calcula el total del carrito (con descuentos de promociones) a partir
-     * de los precios actuales en BD.
+     * Checkout antiguo (Fase 1). OBSOLETO desde la Etapa 2: el cobro en línea se
+     * hace con el flujo del módulo Finance (orden y captura en el servidor,
+     * rutas /pagos/paypal/...). Esta ruta ya NO registra ventas ni pagos; solo
+     * informa, para que ningún formulario antiguo pueda generar una venta.
      */
-    private function calcularTotalCarrito($items): float
+    public function checkout()
     {
-        $cartItems = [];
-        $total = 0;
-
-        foreach ($items as $item) {
-            if ($item->producto) {
-                $subtotal = $item->producto->precio * $item->cantidad;
-                $cartItems[] = [
-                    'idproducto' => $item->idproducto,
-                    'nombre' => $item->producto->nombre,
-                    'precio' => $item->producto->precio,
-                    'cantidad' => $item->cantidad,
-                    'subtotal' => $subtotal
-                ];
-                $total += $subtotal;
-            }
-        }
-
-        $discounts = $this->getCartDiscounts($cartItems);
-        $totalDiscount = collect($discounts)->sum('monto');
-
-        return round(max(0, $total - $totalDiscount), 2);
-    }
-
-    /**
-     * Checkout en línea.
-     *
-     * Fase 1 (seguridad): antes bastaba con enviar este formulario para que
-     * se registrara una venta "pagada" y se descontara stock, sin ningún pago.
-     * Ahora:
-     *  1. El navegador solo envía el ID de la orden de PayPal.
-     *  2. El servidor consulta la orden en PayPal y comprueba estado COMPLETED,
-     *     moneda y monto exacto del carrito.
-     *  3. La orden se registra en `pagos_externos` con clave única: una misma
-     *     orden no puede generar dos ventas.
-     *  4. Si el pago es válido pero la venta falla (p. ej. sin stock), el pago
-     *     queda en estado 'requiere_reembolso' para revisión del personal.
-     */
-    public function checkout(Request $request, PayPalOrderVerifier $verifier)
-    {
-        $this->mergeSessionCart();
-
-        if (!$verifier->isConfigured()) {
-            return redirect()->route('carrito.index')->with('error', 'El pago en línea no está disponible en este momento.');
-        }
-
-        // Método de pago por código (nunca un ID fijo). Si no existe o está
-        // desactivado, no se registra ninguna venta.
-        try {
-            $idPagoEnLinea = MetodoPago::idPorCodigo(MetodoPago::PAYPAL);
-        } catch (\DomainException $e) {
-            return redirect()->route('carrito.index')->with('error', 'El pago en línea no está disponible en este momento.');
-        }
-
-        $request->validate([
-            'paypal_order_id' => ['required', 'string', 'max:64', 'regex:/^[A-Za-z0-9-]+$/'],
-        ]);
-        $orderId = $request->input('paypal_order_id');
-        $ci = Auth::user()->ci;
-
-        // Verificar que hay items
-        $items = Carrito::with('producto')->where('ci_usuario', $ci)->get();
-        if ($items->isEmpty()) {
-            return redirect()->route('carrito.index')->with('error', 'Tu carrito está vacío.');
-        }
-
-        if (PagoExterno::where('proveedor', 'paypal')->where('referencia_externa', $orderId)->exists()) {
-            return redirect()->route('carrito.index')->with('error', 'Esta orden de pago ya fue utilizada.');
-        }
-
-        // Verificación en el servidor (fuera de la transacción: llamada de red)
-        try {
-            $pago = $verifier->verify($orderId, $this->calcularTotalCarrito($items));
-        } catch (\RuntimeException $e) {
-            Bitacora::registrar('PAGO_RECHAZADO', 'pagos_externos', 0, "Orden PayPal {$orderId} rechazada para CI {$ci}: " . $e->getMessage());
-            return redirect()->route('carrito.index')->with('error', 'No se pudo verificar el pago: ' . $e->getMessage());
-        }
-
-        DB::beginTransaction();
-
-        try {
-            // Bloquear los productos y recalcular con precios bloqueados
-            $ids = $items->pluck('idproducto')->all();
-            Producto::whereIn('idproducto', $ids)->lockForUpdate()->get();
-            $items = Carrito::with('producto')->where('ci_usuario', $ci)->get();
-            $totalConDescuento = $this->calcularTotalCarrito($items);
-
-            if ((int) round($totalConDescuento * 100) !== (int) round(((float) $pago['amount']) * 100)) {
-                throw new \RuntimeException('El total del carrito cambió durante el pago.');
-            }
-
-            // Asegurar que el usuario tenga un registro en la tabla 'cliente'
-            Cliente::firstOrCreate(['ci' => $ci], [
-                'categoria' => 'Regular'
-            ]);
-
-            // Obtener el siguiente número correlativo para la factura (FOR UPDATE)
-            $ultimoNro = FacturaVenta::lockForUpdate()->max('nro') ?? 0;
-            $nroFactura = $ultimoNro + 1;
-
-            // Idempotencia: la clave única impide reutilizar la misma orden
-            PagoExterno::create([
-                'proveedor' => 'paypal',
-                'referencia_externa' => $pago['order_id'],
-                'referencia_captura' => $pago['capture_id'],
-                'monto' => $pago['amount'],
-                'moneda' => $pago['currency'],
-                'estado' => 'aplicado',
-                'ci_usuario' => $ci,
-                'nro_factura' => $nroFactura,
-            ]);
-
-            // Crear la Factura de Venta (NotaVenta)
-            $factura = FacturaVenta::create([
-                'nro' => $nroFactura,
-                'fecha' => now(),
-                'total' => $totalConDescuento,
-                'ci_cliente' => $ci,
-                'ci_empleado' => null, // Compra online realizada por el cliente
-                'id_pago' => $idPagoEnLinea // método PAYPAL, resuelto por código
-            ]);
-
-            // Descontar la cantidad de stock en cada producto y crear detalles
-            foreach ($items as $item) {
-                $producto = Producto::where('idproducto', $item->idproducto)->lockForUpdate()->first();
-                if ($producto) {
-                    if ($producto->cantidad < $item->cantidad) {
-                        throw new \Exception("Stock insuficiente para el producto: {$producto->nombre}.");
-                    }
-                    // Previene que quede en negativo
-                    $producto->cantidad -= $item->cantidad;
-                    $producto->save();
-
-                    // Crear detalle de venta
-                    DetalleFacturaVenta::create([
-                        'nro_factura' => $nroFactura,
-                        'id_producto' => $item->idproducto,
-                        'precio_unitario' => $producto->precio,
-                        'cantidad' => $item->cantidad,
-                        'descuento' => 0.00
-                    ]);
-                }
-            }
-
-            // Vaciar el carrito ya que la compra fue "hecha"
-            Carrito::where('ci_usuario', Auth::user()->ci)->delete();
-
-            // Registrar en la Bitácora
-            Bitacora::registrar(
-                'INSERTAR',
-                'notaventa',
-                $nroFactura,
-                "Compra online realizada con éxito por total de " . number_format($totalConDescuento, 2) . " BOB. Cliente CI: " . Auth::user()->ci
-                . ". Orden PayPal {$pago['order_id']} / captura {$pago['capture_id']}"
-            );
-
-            DB::commit();
-
-            return view('carrito.success');
-
-        } catch (\Throwable $e) {
-            DB::rollBack();
-
-            // Doble envío simultáneo: otra petición ya aplicó esta misma orden.
-            $yaAplicada = PagoExterno::where('proveedor', 'paypal')
-                ->where('referencia_externa', $pago['order_id'])
-                ->where('estado', 'aplicado')
-                ->exists();
-            if ($yaAplicada) {
-                return redirect()->route('carrito.index')->with('success', 'Tu pago ya fue procesado.');
-            }
-
-            // El dinero ya fue cobrado: dejar constancia para reembolso manual.
-            try {
-                PagoExterno::firstOrCreate(
-                    ['proveedor' => 'paypal', 'referencia_externa' => $pago['order_id']],
-                    [
-                        'referencia_captura' => $pago['capture_id'],
-                        'monto' => $pago['amount'],
-                        'moneda' => $pago['currency'],
-                        'estado' => 'requiere_reembolso',
-                        'ci_usuario' => $ci,
-                    ]
-                );
-                Bitacora::registrar('PAGO_SIN_VENTA', 'pagos_externos', 0, "Orden PayPal {$pago['order_id']} cobrada pero la venta falló (CI {$ci}). Requiere reembolso.");
-            } catch (\Throwable $ignored) {
-                \Illuminate\Support\Facades\Log::critical('Pago PayPal cobrado sin venta ni registro', ['order' => $pago['order_id'], 'ci' => $ci]);
-            }
-
-            $mensaje = $e instanceof \RuntimeException || str_starts_with($e->getMessage(), 'Stock insuficiente')
-                ? $e->getMessage()
-                : 'Error al procesar la compra.';
-
-            return redirect()->route('carrito.index')->with('error', $mensaje . ' Tu pago quedó registrado y el personal se comunicará contigo para el reembolso.');
-        }
+        return redirect()->route('carrito.index')->with('error', 'El pago en línea se realiza con el botón de PayPal del carrito. No se registró ninguna venta.');
     }
 
     public function generarCotizacion()
@@ -763,63 +586,7 @@ class CartController extends Controller
      */
     private function getCartDiscounts(array $cartItems): array
     {
-        $discounts = [];
-
-        // IDs de productos en el carrito
-        $cartProductIds = collect($cartItems)->pluck('idproducto')->toArray();
-
-        if (empty($cartProductIds)) {
-            return $discounts;
-        }
-
-        // Obtener promociones activas vigentes
-        $promociones = Promocion::with('productos')
-            ->where('estado', 'Activo')
-            ->where('fecha_inicio', '<=', now())
-            ->where('fecha_fin', '>=', now())
-            ->get();
-
-        foreach ($promociones as $promo) {
-            $promoProductIds = $promo->productos->pluck('idproducto')->toArray();
-
-            if ($promo->tipo === 'Combo') {
-                // Verificar si TODOS los productos del combo están en el carrito
-                $allPresent = empty(array_diff($promoProductIds, $cartProductIds));
-                if ($allPresent && $promo->precio_combo !== null) {
-                    // Calcular el precio original sumando los precios individuales
-                    $precioOriginal = 0;
-                    foreach ($cartItems as $item) {
-                        if (in_array($item['idproducto'], $promoProductIds)) {
-                            $precioOriginal += $item['precio']; // precio unitario × 1
-                        }
-                    }
-                    $ahorro = $precioOriginal - $promo->precio_combo;
-                    if ($ahorro > 0) {
-                        $discounts[] = [
-                            'nombre' => "Combo: {$promo->nombre}",
-                            'descripcion' => "Precio combo: " . number_format($promo->precio_combo, 2) . " Bs.",
-                            'monto' => round($ahorro, 2),
-                        ];
-                    }
-                }
-            } elseif ($promo->tipo === 'Global' && $promo->descuento_porcentaje > 0) {
-                // Aplicar descuento porcentual a cada producto del carrito que esté en la promo
-                $descuentoTotal = 0;
-                foreach ($cartItems as $item) {
-                    if (in_array($item['idproducto'], $promoProductIds)) {
-                        $descuentoTotal += ($item['subtotal'] * $promo->descuento_porcentaje / 100);
-                    }
-                }
-                if ($descuentoTotal > 0) {
-                    $discounts[] = [
-                        'nombre' => "{$promo->nombre} (-{$promo->descuento_porcentaje}%)",
-                        'descripcion' => "Descuento aplicado a productos seleccionados",
-                        'monto' => round($descuentoTotal, 2),
-                    ];
-                }
-            }
-        }
-
-        return $discounts;
+        // Lógica movida sin cambios a CarritoService (la reutiliza el pago en línea)
+        return app(\Modules\Sales\Services\CarritoService::class)->descuentos($cartItems);
     }
 }

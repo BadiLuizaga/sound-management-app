@@ -52,7 +52,13 @@ return [
         'client_id' => env('PAYPAL_CLIENT_ID'),
         'secret' => env('PAYPAL_CLIENT_SECRET'),
         'mode' => env('PAYPAL_MODE', 'sandbox'), // sandbox | live
+        // Moneda en la que cobra PayPal (no admite BOB). Los importes de la
+        // aplicación son siempre BOB y se convierten con la tasa del día
+        // registrada por el administrador (tabla tipos_cambio).
         'currency' => env('PAYPAL_CURRENCY', 'USD'),
+        // ID del webhook configurado en PayPal: obligatorio para verificar firmas.
+        // Sin él, el pago en línea queda desactivado.
+        'webhook_id' => env('PAYPAL_WEBHOOK_ID'),
     ],
 
 ];

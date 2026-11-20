@@ -15,6 +15,12 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'admin' => \App\Http\Middleware\AdminMiddleware::class,
         ]);
+
+        // Fase 2 — Etapa 2: el webhook de PayPal no tiene sesión ni token CSRF;
+        // su autenticidad se verifica con la firma de PayPal. Única excepción.
+        $middleware->validateCsrfTokens(except: [
+            'webhooks/paypal',
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

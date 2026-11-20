@@ -31,6 +31,15 @@ class PermisoSeeder extends Seeder
         'rentals.operate' => 'Registrar alquileres y devoluciones.',
         'maintenance.manage' => 'Gestionar mantenimientos de equipos.',
         'reports.ai' => 'Reportes con IA (solo lectura).',
+        'finance.payments.view_all' => 'Ver todos los pagos.',
+        'finance.payments.view_own' => 'Ver los pagos de caja registrados por uno mismo.',
+        'finance.payments.register' => 'Registrar cobros presenciales en caja.',
+        'finance.payments.verify' => 'Verificar o rechazar transferencias y pagos QR.',
+        'finance.payments.reconcile' => 'Conciliar pagos: reintentar o cerrar manualmente la aplicación.',
+        'finance.refunds.request' => 'Solicitar reembolsos y confirmar su entrega en caja.',
+        'finance.refunds.execute' => 'Autorizar y ejecutar reembolsos.',
+        'finance.exchange.manage' => 'Registrar y modificar tipos de cambio.',
+        'finance.audit.view' => 'Ver el historial financiero y los webhooks.',
     ];
 
     public function run(): void

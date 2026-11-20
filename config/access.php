@@ -57,6 +57,17 @@ return [
 
         // Reportes con IA (consultas de solo lectura)
         'reports.ai'         => ['admin'],
+
+        // Finanzas (Fase 2 — Etapa 2). Técnico, almacenero y cliente: ninguno por defecto.
+        'finance.payments.view_all'  => ['admin', 'encargado'],
+        'finance.payments.view_own'  => ['admin', 'encargado', 'vendedor'],   // pagos de caja registrados por él
+        'finance.payments.register'  => ['admin', 'encargado', 'vendedor'],   // cobro presencial en caja
+        'finance.payments.verify'    => ['admin', 'encargado'],               // transferencias y QR
+        'finance.payments.reconcile' => ['admin', 'encargado'],               // reintentar / aplicar manualmente
+        'finance.refunds.request'    => ['admin', 'encargado'],               // solicitar y confirmar entrega en caja
+        'finance.refunds.execute'    => ['admin'],                            // autorizar y ejecutar reembolsos
+        'finance.exchange.manage'    => ['admin'],                            // tipos de cambio
+        'finance.audit.view'         => ['admin'],                            // historial, webhooks
     ],
 
 ];

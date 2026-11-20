@@ -13,7 +13,18 @@ class DevolucionDetalle extends Model
         'devolucion_id',
         'idproducto',
         'cantidad',
+        // Fase 2 — Etapa 2: importe neto devuelto por línea
+        'precio_unitario',
+        'subtotal',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'precio_unitario' => 'decimal:2',
+            'subtotal' => 'decimal:2',
+        ];
+    }
 
     /**
      * Relación con la devolución principal

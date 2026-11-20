@@ -165,6 +165,21 @@
             Mantenimientos
         </a>
         @endcan
+
+        {{-- Finanzas (Etapa 2): mismos permisos que las rutas --}}
+        @canany(['finance.payments.view_all', 'finance.payments.view_own'])
+        <a href="{{ route('finanzas.admin.pagos.index') }}" class="nav-link {{ request()->routeIs('finanzas.admin.pagos.*') ? 'active' : '' }}">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect><line x1="1" y1="10" x2="23" y2="10"></line></svg>
+            Pagos
+        </a>
+        @endcanany
+
+        @can('finance.exchange.manage')
+        <a href="{{ route('finanzas.admin.tipos-cambio.index') }}" class="nav-link {{ request()->routeIs('finanzas.admin.tipos-cambio.*') ? 'active' : '' }}">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+            Tipos de cambio
+        </a>
+        @endcan
     </nav>
     
     <!-- Footer -->

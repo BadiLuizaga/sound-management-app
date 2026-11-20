@@ -36,7 +36,11 @@ class AccessControl
 
     public function allows(?Authenticatable $user, string $ability): bool
     {
-        $allowed = (array) config("access.abilities.{$ability}", []);
+        // Las habilidades contienen puntos ('sales.operate'): no se puede usar la
+        // notación de puntos de config(), que las trataría como claves anidadas
+        // y devolvería vacío (error corregido en la Fase 2 — Etapa 2).
+        $abilities = (array) config('access.abilities', []);
+        $allowed = (array) ($abilities[$ability] ?? []);
 
         return $allowed !== [] && array_intersect($allowed, $this->rolesFor($user)) !== [];
     }

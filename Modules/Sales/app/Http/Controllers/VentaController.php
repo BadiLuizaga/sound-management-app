@@ -16,6 +16,10 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Modules\Finance\Enums\EstadoPago;
+use Modules\Finance\Exceptions\AplicacionFallida;
+use Modules\Finance\Services\PagoService;
+use Modules\Finance\Support\Dinero;
 
 class VentaController extends Controller
 {
@@ -143,109 +147,92 @@ class VentaController extends Controller
     /**
      * Almacenar la venta.
      */
-    public function store(Request $request)
+    /**
+     * Registrar una venta en tienda con su cobro (Fase 2 — Etapa 2).
+     *
+     * El cobro lo registra el módulo Finance (PagoService::registrarPresencial):
+     *  - Efectivo / tarjeta: pago 'recibido' y la venta en la MISMA transacción
+     *    (si la venta falla no se registra nada).
+     *  - Transferencia / QR: pago 'pendiente_verificacion' SIN venta ni descuento
+     *    de stock; la venta se crea cuando un administrador o encargado verifica
+     *    el ingreso.
+     *  - Referencia obligatoria y única para tarjeta, transferencia y QR.
+     *  - `clave_idempotencia`: el mismo envío dos veces no duplica el cobro.
+     */
+    public function store(Request $request, PagoService $pagos)
     {
         $request->validate([
             'ci_cliente' => 'required|exists:usuario,ci',
             'id_pago' => ['required', MetodoPago::reglaPresencial()],
             'productos' => 'required|array|min:1',
-            'productos.*.id' => 'required|exists:producto,idproducto',
+            'productos.*.id' => 'required|distinct|exists:producto,idproducto',
             'productos.*.cantidad' => 'required|integer|min:1',
-            'productos.*.descuento' => 'nullable|numeric|min:0'
+            'productos.*.descuento' => 'nullable|numeric|min:0',
+            'referencia' => 'nullable|string|max:100',
+            'efectivo_recibido' => 'nullable|numeric|min:0',
+            'clave_idempotencia' => ['required', 'string', 'min:16', 'max:60', 'regex:/^[A-Za-z0-9-]+$/'],
         ]);
 
-        // Verificar si el cajero tiene una caja abierta
-        $cajaAbierta = Caja::where('user_id', Auth::id())
-            ->where('estado', 'abierta')
-            ->first();
+        $codigo = MetodoPago::whereKey($request->id_pago)->value('codigo');
 
-        if (!$cajaAbierta) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Debes realizar la apertura de la caja antes de registrar ventas.'
-            ], 422);
+        // Precios actuales del servidor (nunca del navegador), congelados en el snapshot
+        $items = [];
+        $total = Dinero::cero('BOB');
+        foreach ($request->productos as $item) {
+            $producto = Producto::where('idproducto', $item['id'])->first();
+            $precio = Dinero::deDecimal((string) $producto->precio, 'BOB');
+            $descuento = Dinero::deDecimal((string) ($item['descuento'] ?? 0), 'BOB');
+            $subtotal = Dinero::deCentavos($precio->centavos * (int) $item['cantidad'], 'BOB')->restar($descuento);
+
+            if ($subtotal->centavos < 0) {
+                return response()->json(['success' => false, 'message' => 'El descuento no puede ser mayor que el precio total del producto.'], 422);
+            }
+
+            $items[] = [
+                'idproducto' => (int) $producto->idproducto,
+                'nombre' => $producto->nombre,
+                'precio_unitario' => $precio->decimal(),
+                'cantidad' => (int) $item['cantidad'],
+                'descuento' => $descuento->decimal(),
+                'subtotal' => $subtotal->decimal(),
+            ];
+            $total = $total->sumar($subtotal);
         }
 
-        DB::beginTransaction();
+        $snapshot = [
+            'tipo' => PagoService::TIPO_VENTA_PRESENCIAL,
+            'ci_cliente' => (int) $request->ci_cliente,
+            'items' => $items,
+            'total' => $total->decimal(),
+        ];
 
         try {
-            // 1. Obtener el siguiente número correlativo para la factura
-            // FOR UPDATE: evita que dos ventas simultáneas obtengan el mismo número
-            $ultimoNro = FacturaVenta::lockForUpdate()->max('nro') ?? 0;
-            $nroFactura = $ultimoNro + 1;
-
-            $totalFactura = 0;
-            $detallesVenta = [];
-
-            // 2. Procesar y verificar stock de los productos
-            foreach ($request->productos as $item) {
-                $producto = Producto::where('idproducto', $item['id'])->lockForUpdate()->first();
-
-                if (!$producto) {
-                    throw new \Exception("El producto con ID {$item['id']} no existe.");
-                }
-
-                if ($producto->cantidad < $item['cantidad']) {
-                    throw new \Exception("Stock insuficiente para el producto: {$producto->nombre}. Stock disponible: {$producto->cantidad}.");
-                }
-
-                $descuento = isset($item['descuento']) ? (float)$item['descuento'] : 0.00;
-                $precioUnitario = (float)$producto->precio;
-                $subtotal = ($precioUnitario * $item['cantidad']) - $descuento;
-
-                if ($subtotal < 0) {
-                    throw new \Exception("El descuento no puede ser mayor que el precio total del producto.");
-                }
-
-                $totalFactura += $subtotal;
-
-                // Descontar stock del producto
-                $producto->cantidad -= $item['cantidad'];
-                $producto->save();
-
-                // Almacenar temporalmente los detalles
-                $detallesVenta[] = [
-                    'nro_factura' => $nroFactura,
-                    'id_producto' => $producto->idproducto,
-                    'precio_unitario' => $precioUnitario,
-                    'cantidad' => $item['cantidad'],
-                    'descuento' => $descuento
-                ];
-            }
-
-            // 3. Crear la Factura de Venta
-            $factura = FacturaVenta::create([
-                'nro' => $nroFactura,
-                'fecha' => now(),
-                'total' => $totalFactura,
-                'ci_cliente' => $request->ci_cliente,
-                'ci_empleado' => Auth::user()->ci, // Registramos al empleado/cajero actual
-                'id_pago' => $request->id_pago
+            $pago = $pagos->registrarPresencial($request->user(), (string) $codigo, $total, $snapshot, [
+                'referencia' => $request->input('referencia'),
+                'efectivo_recibido' => $request->input('efectivo_recibido'),
+                'clave_idempotencia' => 'pos-' . $request->user()->ci . '-' . $request->input('clave_idempotencia'),
             ]);
+        } catch (AplicacionFallida|\DomainException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 422);
+        }
 
-            // 4. Insertar los detalles de la venta
-            foreach ($detallesVenta as $detalle) {
-                DetalleFacturaVenta::create($detalle);
-            }
-
-            // 5. Registrar en bitácora
-            Bitacora::registrar('INSERTAR', 'notaventa', $nroFactura, "Venta física registrada en tienda por total de " . number_format($totalFactura, 2) . " BOB. Cliente CI: {$request->ci_cliente}");
-
-            DB::commit();
-
+        if ($pago->estado === EstadoPago::PendienteVerificacion) {
             return response()->json([
                 'success' => true,
-                'message' => 'Venta registrada con éxito.',
-                'nro_factura' => $nroFactura
+                'pendiente' => true,
+                'pago' => $pago->uuid,
+                'message' => 'Cobro registrado como PENDIENTE DE VERIFICACIÓN. La venta se confirmará y el stock se descontará cuando un administrador o encargado verifique el ingreso.',
             ]);
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            return response()->json([
-                'success' => false,
-                'message' => 'Error al registrar la venta: ' . $e->getMessage()
-            ], 500);
         }
+
+        return response()->json([
+            'success' => true,
+            'pendiente' => false,
+            'pago' => $pago->uuid,
+            'cambio' => $pago->cambio_entregado !== null ? (string) $pago->cambio_entregado : null,
+            'message' => 'Venta registrada con éxito.',
+            'nro_factura' => $pago->nro_factura,
+        ]);
     }
 
     /**

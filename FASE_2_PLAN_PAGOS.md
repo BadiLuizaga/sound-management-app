@@ -1,360 +1,437 @@
-# FASE 2 — ETAPA 2: PLAN DEL SISTEMA DE PAGOS
+# FASE 2 — ETAPA 2: SISTEMA DE PAGOS — DISEÑO TÉCNICO FINAL
 
-**Estado:** 📋 **Diagnóstico y propuesta. Pendiente de aprobación.** No se ha modificado código, migraciones ni configuración.
+**Estado:** 📐 **Diseño final pendiente de aprobación explícita.** Todavía no se ha creado ni modificado ningún archivo de código, migraciones ni configuración. Solo se ha actualizado este documento.
 **Fecha:** 2026-11-20
-**Base de pruebas prevista:** `127.0.0.1:3310/sound_management_test` (MySQL 8.4.13 portátil) + SQLite en memoria. Sin credenciales reales ni cobros reales: PayPal siempre simulado con `Http::fake()`.
+**Pruebas:** solo `127.0.0.1:3310/sound_management_test` (MySQL 8.4.13 portátil) y SQLite en memoria. PayPal siempre simulado con `Http::fake()`, sin credenciales reales ni cobros.
 
 ---
 
-## PARTE 2.1 — DIAGNÓSTICO (código real)
+## 0. Decisiones aprobadas y cómo las aplica el diseño
 
-### 1. Modelos y tablas de pagos
-
-| Tabla / modelo | Qué guarda hoy | Carencias |
+| # | Decisión | Aplicación en el diseño |
 |---|---|---|
-| `pagos_externos` / `Modules\Sales\Models\PagoExterno` (migración `2026_11_20_000001`) | `proveedor`, `referencia_externa` (UNIQUE con proveedor), `referencia_captura`, `monto`, `moneda`, `estado` (texto libre: `aplicado` \| `requiere_reembolso`), `ci_usuario` NOT NULL, `nro_factura` | Sin FKs; sin estados intermedios (no existe "orden creada", "recibido" ni "verificando"); sin *snapshot* del carrito; sin vínculo con métodos, reservas ni alquileres; sin historial; `ci_usuario` NOT NULL impide registrar eventos de webhook sin sesión. **Solo lo usa el checkout en línea.** |
-| `metodoPago` / `MetodoPago` | `id`, `codigo` (UNIQUE), `nombre`, `activo`; EFECTIVO, TARJETA, TRANSFERENCIA, QR, PAYPAL | Correcto desde la Etapa 1. |
-| `NotaVenta` / `FacturaVenta` | `nro`, `fecha`, `total`, `ci_cliente`, `ci_empleado`, `id_pago` (FK metodoPago) | **No registra el pago en sí**: ni importe recibido, ni referencia, ni moneda, ni estado. Un solo método por nota. |
-| `alquileres` / `Alquiler` | `metodo_pago_id` (FK), `monto_garantia`, `total_estimado`, `total_real` | **Nunca registra un cobro**: ni anticipo, ni saldo, ni recepción o devolución de la garantía. |
-| `reservas` / `Reserva` (Etapa 1) | `estado_pago` (`pendiente`\|`parcial`\|`pagado`\|`reembolsado`), `total`, `moneda` = BOB | Ninguna tabla de pagos la referencia todavía. |
-| `cajas` / `Caja` | apertura, cierre, diferencia | No tiene movimientos; el saldo esperado se calcula sumando `NotaVenta.total` (ver §4). |
+| 1 | Migraciones nuevas; no modificar las ejecutadas; no eliminar `pagos_externos` sin transición segura | 6 migraciones **nuevas** en el módulo Finance (§3). `pagos_externos` **se conserva** como histórico de solo lectura y sus filas se **copian** a `pagos` con referencia al original (§3.6). No se modifica ni elimina ninguna migración. |
+| 2 | Tipo de cambio: solo el administrador; vigencia diaria con fecha explícita; 2 decimales; sin margen; nunca una tasa por defecto | `tipos_cambio` con una fila por `fecha_aplicacion` (zona `America/La_Paz`), única por día. Sin tasa del día → **el pago en línea no se ofrece**. Las tasas ya usadas por un pago no se editan (§2.5). |
+| 3 | Transferencia y QR pendientes hasta que un administrador o encargado verifique el ingreso; referencia obligatoria y única | Estado `pendiente_verificacion`; solo pasa a `recibido` con `finance.payments.verify`. UNIQUE `(metodo_pago_id, referencia_externa)`. |
+| 4 | Reembolsos de PayPal totales y parciales, con autorización, auditoría e idempotencia | Tabla `reembolsos` con clave de idempotencia, `PayPal-Request-Id` y doble paso (solicitar → autorizar y ejecutar). |
+| 5 | Devoluciones de ventas cobradas → registro de devolución + reembolso vinculado; **nunca** modificar ni borrar líneas de la nota | `DevolucionController@aprobar` deja de tocar `NotaVenta` y `detalleNotaVenta`; guarda importes en la devolución y crea el `reembolso` (§2.7). |
+| 6 | Alquileres antiguos como históricos, sin cobros retroactivos; los cobros nuevos van a reservas | `alquileres` no se toca. `pagos.reserva_id` para los cobros nuevos. |
+| 7 | Expiración a los 30 minutos; **nunca** expirar `verificando` ni capturas inciertas | Solo `iniciado` y `orden_creada`, y **después** de consultar a PayPal (§2.6). |
+| 8 | Módulo independiente `Finance` | `Modules/Finance` con su propio `composer.json`. El plugin de fusión ya incluye `Modules/*/composer.json`, así que **no se edita el `composer.json` raíz** (§1.2). |
+| 9 | Permisos: admin todo; encargado operativo + verificación; vendedor solo registrar y ver sus pagos de caja; nada para técnico, almacenero y cliente | Matriz de §4. Los permisos personalizados no se pisan (`insertOrIgnore`). |
+| 10 | Sin credenciales *sandbox* por ahora | Todo con `Http::fake()`; la prueba manual con *sandbox* queda pendiente. |
 
-### 2. Controladores y rutas con dinero
+---
 
-| Ruta | Controlador | Qué hace |
-|---|---|---|
-| `POST /carrito/checkout` (`auth`, `throttle:10,1`) | `CartController@checkout` | Verifica la orden de PayPal ya **capturada por el navegador** y crea `PagoExterno` + `NotaVenta`. |
-| `POST /ventas` (`can:sales.operate`) | `VentaController@store` | POS: crea `NotaVenta` con `id_pago` presencial. **No crea ningún registro de pago.** |
-| `POST /alquileres`, `POST /alquileres/{id}/devolucion` (`can:rentals.operate`) | `AlquilerController` | Calcula totales y guarda `metodo_pago_id`. **No registra cobros.** |
-| `/caja/*` (`admin`) | `CajaController` | Apertura, corte y reporte. |
-| `POST /devoluciones/{id}/aprobar` (`admin`) | `DevolucionController@aprobar` | **Reduce `NotaVenta.total` y borra o modifica líneas de `detalleNotaVenta` sin registrar ningún reembolso.** |
-| — | — | **No existen** rutas de administración de pagos, reembolsos, conciliación ni webhooks. |
+## 1. Arquitectura
 
-### 3. Flujo actual de PayPal
+### 1.1 Visión general
 
 ```
-Navegador                                   Servidor
-─────────                                   ────────
-actions.order.create({value: totalBOB})     (no interviene)
-   └─ moneda del SDK = PAYPAL_CURRENCY (USD)
-actions.order.capture()   ← COBRO REAL AQUÍ
-POST /carrito/checkout {paypal_order_id} →  1. isConfigured() + método PAYPAL
-                                            2. ¿orden ya usada? (pagos_externos)
-                                            3. GET /v2/checkout/orders/{id}: COMPLETED, moneda, monto
-                                            4. Transacción: PagoExterno 'aplicado' + NotaVenta + stock
-                                            5. Si falla 4 → PagoExterno 'requiere_reembolso'
+Sales (carrito, POS)   Rentals (reservas)   Procurement (devoluciones)
+        │                     │                      │
+        └──────────── Finance\Services ──────────────┘
+                 PagoService · ReembolsoService · TipoCambioService · ConciliacionService
+                 Aplicadores: VentaEnLinea · VentaPresencial · Reserva
+                 Gateways\PaymentGateway ← Gateways\PayPal\PayPalGateway (+ PayPalClient)
+                 Webhooks\PayPalWebhookProcessor
+                        │
+   tipos_cambio · tipo_cambio_revisiones · pagos · pago_eventos · reembolsos · webhook_eventos
 ```
 
-| # | Problema | Ubicación | Consecuencia |
-|---|---|---|---|
-| F1 | **Se envía el total en BOB como si fuera USD.** El SDK usa `currency=USD` y `value = $totalConDescuento`, que está en bolivianos. | `resources/views/carrito/index.blade.php` (createOrder) + `config/services.php` (`paypal.currency`) | Se cobra unas 7 veces más. **Incumple la regla "sin conversiones implícitas".** |
-| F2 | La orden y la captura se hacen en el navegador | vista del carrito | El dinero se cobra **antes** de que el servidor sepa nada. |
-| F3 | La orden no queda vinculada al usuario ni al intento de pago (sin `custom_id` ni `invoice_id`) | `PayPalOrderVerifier` | Cualquier orden `COMPLETED` del mismo importe se acepta una vez. |
-| F4 | Si la verificación falla **después** del cobro (API caída, *timeout*, carrito cambiado), solo queda una línea en la bitácora | `CartController@checkout` (`catch RuntimeException`) | **Pago recibido sin registro en la tabla de pagos.** Incumple la regla de conservar todo pago recibido. |
-| F5 | *Deadlock* o *lock timeout* al aplicar la venta, sin reintento | ídem | Un pago válido queda como `requiere_reembolso`. |
-| F6 | Sin reembolso, conciliación ni webhook | — | Los reembolsos y contracargos no se conocen; los pagos en revisión dependen de una consulta manual. |
-| F7 | El *token* OAuth se pide en cada verificación | `PayPalOrderVerifier::accessToken()` | Latencia y riesgo de límite de peticiones (menor). |
+**Principios (condiciones obligatorias):**
+1. **Estado del dinero ≠ estado de aplicación.** `pagos.estado` frente a `pagos.estado_aplicacion`.
+2. **Un pago recibido se confirma (*commit*) antes de aplicarlo.** Ningún fallo posterior lo borra. Las filas de `pagos` y `reembolsos` **nunca se eliminan** (FKs `restrict`; sin borrado en cascada).
+3. **El navegador nunca da un pago por recibido.** Solo lo hacen la captura en el servidor (respuesta de PayPal verificada), un webhook con firma verificada o la verificación de una persona autorizada.
+4. **Importes en centavos enteros** (`Finance\Support\Dinero`), BOB como moneda operativa. Nada de `float` en las comparaciones.
+5. **Idempotencia** en crear, capturar, aplicar, webhooks, reembolsos y registros presenciales (§2.4).
+6. **Bloqueos de fila** (`SELECT … FOR UPDATE` por la PK del pago), sin *gap locks*. Reintentos ante *deadlock*.
 
-### 4. Integración con ventas y alquileres
-- **Venta en línea:** 1 pago → 1 `NotaVenta` (`id_pago` = PAYPAL, ya resuelto por código).
-- **POS:** `NotaVenta` con `id_pago` presencial.
-  - Tarjeta, transferencia y QR **sin referencia** (nº de *voucher* u operación), así que **la misma transacción podría registrarse dos veces**.
-  - En efectivo no se registra lo entregado ni el cambio.
-- **Caja:** el saldo esperado suma **todas** las ventas del cajero, sea cual sea el método. Una venta con tarjeta o QR aumenta el "efectivo esperado". *(La lógica de caja es de la Etapa 3, pero necesita el registro de pagos de esta etapa.)*
-- **Alquileres heredados:** sin cobros; `total_real` se calcula al devolver, pero nadie registra que se cobró.
-- **Reservas (Etapa 1):** solo el esquema. `estado_pago` no se calcula a partir de nada.
-- **Devoluciones:** cambian el total de la nota ya cobrada, sin reembolso ni rastro contable (ver §2).
+### 1.2 Módulo `Finance`: registro sin tocar `composer.json`
+- **Comprobado en el código:** `composer.json` raíz → `extra.merge-plugin.include = ["Modules/*/composer.json"]`. El `composer.json` propio del módulo (con su `autoload.psr-4`) se fusiona en `composer dump-autoload`.
+- Se ejecutará `composer dump-autoload --optimize --no-scripts` con el Composer portátil de `.tools`, comprobando que el SHA-256 de `composer.lock` y de `composer.json` **no cambia**.
+- **Si el plugin no registrara el módulo sin editar el `composer.json` raíz, me detendré y te lo informaré antes de hacer nada más.**
+- Se crea a mano, sin usar `php artisan module:make`, que lanzaría `composer` como proceso del sistema:
+  - `Modules/Finance/module.json`
+  - `Modules/Finance/composer.json`
+  - `Modules/Finance/app/Providers/{FinanceServiceProvider, RouteServiceProvider, EventServiceProvider}.php`
+  - `Modules/Finance/routes/{web.php, api.php}`
+  - `Modules/Finance/config/config.php`
+- `modules_statuses.json` añade `"Finance": true`.
+- El `ModuleServiceProvider` de nwidart v13 (comprobado) carga automáticamente las migraciones del módulo, los comandos (`$commands`), las tareas (`configureSchedules`), la configuración y las vistas.
+- **Dependencias entre módulos:** Finance usa `MetodoPago`, `FacturaVenta` (Sales), `Reserva` (Rentals), `Devolucion` (Procurement) y `Caja` (Sales). Sales, Rentals y Procurement llaman a Finance **solo a través de sus servicios**.
 
-### 5. Relaciones con los métodos de pago
-- `NotaVenta.id_pago`, `NotaCompra.id_pago` y `alquileres.metodo_pago_id` tienen FK a `metodoPago(id)`.
-- `pagos_externos` no tiene FK hacia nada.
-- La resolución del método por código y la regla "presencial" (`MetodoPago::reglaPresencial()`) están bien desde la Etapa 1.
+### 1.3 Componentes
 
-### 6. Estados actuales
-| Entidad | Estados |
+| Componente | Responsabilidad |
 |---|---|
-| `pagos_externos.estado` | `aplicado`, `requiere_reembolso` (texto libre, sin máquina de estados) |
-| `reservas.estado_pago` | `pendiente`, `parcial`, `pagado`, `reembolsado` (enum; nadie lo actualiza) |
-| `NotaVenta` | ninguno (se crea ya "pagada") |
-| `alquileres.estado` | `activo`, `completado`, `cancelado`, `atrasado` (no tiene relación con el pago) |
-
-### 7. Auditoría y trazabilidad
-- Solo existe `Bitacora::registrar()`, con texto libre (`PAGO_RECHAZADO`, `PAGO_SIN_VENTA`, `INSERTAR notaventa`).
-- No hay historial estructurado de transiciones por pago, ni registro de las respuestas del proveedor, ni de eventos recibidos.
-
-### 8. Configuración de moneda
-- La moneda operativa (BOB) **no está configurada en ninguna parte**: aparece solo en textos ("BOB", "Bs.") y en `reservas.moneda`.
-- `services.paypal.currency` = `USD` (por defecto).
-- **No existe ningún mecanismo de conversión**: el único "puente" es el error F1.
-- **PayPal no admite BOB** como moneda de cobro, así que la conversión a USD es necesaria, y debe ser explícita.
-
-### 9. Webhooks
-**No existe ninguno**: ni ruta, ni controlador, ni verificación de firma, ni tabla de eventos. `bootstrap/app.php` no tiene excepciones de CSRF.
-
-### 10. Pruebas existentes
-- `tests/Feature/Instalacion/MetodoPagoTest::test_checkout_no_registra_venta_si_el_metodo_paypal_no_existe`: la única prueba del checkout.
-- **No hay ninguna prueba del flujo de PayPal** (no se usa `Http::fake` en el proyecto).
-- No hay pruebas del POS, de la caja ni de las devoluciones.
+| `Finance\Support\Dinero` | Valor inmutable en centavos + moneda; suma, resta, comparación, formato. |
+| `Finance\Enums\{EstadoPago, EstadoAplicacion, EstadoReembolso, CanalPago}` | Enums PHP con `transicionesPermitidas()`. |
+| `Finance\Services\TipoCambioService` | `vigenteParaHoy()`, `registrar()` (solo admin), `convertirBobAUsd()` (HALF_UP, 2 decimales). |
+| `Finance\Services\PagoService` | Ciclo completo del pago: crear el intento, la orden, la captura, marcar recibido, aplicar, registrar presencial, verificar o rechazar, expirar. Valida cada transición y escribe `pago_eventos`. |
+| `Finance\Services\ReembolsoService` | Solicitar, autorizar y ejecutar; reembolso parcial o total; recalcula el estado del pago. |
+| `Finance\Services\ConciliacionService` | Lo usa `finanzas:conciliar` (§2.6). |
+| `Finance\Aplicadores\{AplicadorVentaEnLinea, AplicadorVentaPresencial, AplicadorReserva}` | Generan la `NotaVenta` a partir del *snapshot* o recalculan `reservas.estado_pago`. Interfaz `AplicadorPago`. |
+| `Finance\Gateways\PaymentGateway` | `crearOrden`, `capturarOrden`, `consultarOrden`, `reembolsarCaptura`, `verificarFirmaWebhook`. |
+| `Finance\Gateways\PayPal\PayPalClient` | HTTP (Orders v2 y Payments v2), OAuth con el *token* en caché (Laravel Cache), *timeouts* y cabecera `PayPal-Request-Id`. |
+| `Finance\Gateways\PayPal\PayPalGateway` | Traduce las respuestas de PayPal a resultados tipados; nunca expone el secreto. |
+| `Finance\Webhooks\PayPalWebhookProcessor` | Procesa eventos ya verificados y guardados. |
+| `Finance\Console\ConciliarPagos` | `php artisan finanzas:conciliar`, programado cada 5 minutos (perfil `workers` de Docker). |
 
 ---
 
-## PARTE 2.2 — PROPUESTA TÉCNICA
+## 2. Flujos
 
-### A. Arquitectura recomendada
-
-```
-                       ┌──────────────── Modules/Sales/app/Payments ────────────────┐
- Controladores         │  PaymentService (orquesta; transiciones válidas)           │
- PagoEnLinea ─────────▶│  ConversionService (BOB → moneda del proveedor, explícita) │
- PayPalWebhook ───────▶│  Aplicadores: VentaEnLinea, PagoReserva                    │
- Admin\Pago ──────────▶│  PaymentGateway (interfaz) ← PayPalGateway                 │
- POS (VentaController) │                               (PayPalClient + token)       │
-                       └──────────────┬─────────────────────────────────────────────┘
-                                      ▼
-            pagos  ──< pago_eventos   webhook_eventos   tipos_cambio
-             │ FK: metodoPago, NotaVenta, reservas, cajas, usuario
-```
-
-**Principios:**
-1. **Libro único de pagos** (`pagos`): todo dinero recibido o devuelto, sea cual sea el método.
-2. **Dos estados independientes:**
-   - `estado`: qué pasó con el dinero.
-   - `estado_aplicacion`: si ya se generó la venta o la reserva.
-
-   Así **un pago recibido nunca desaparece**: su registro se confirma (*commit*) **antes** de intentar aplicarlo.
-3. **El servidor crea y captura la orden.** El navegador solo aprueba en PayPal.
-4. **Importes siempre en BOB.** Cuando el proveedor cobra en otra moneda, se guardan los dos importes y el tipo de cambio usado.
-5. **Idempotencia en todos los puntos de entrada:** crear, capturar, webhook, reembolso y registro presencial.
-6. **Módulo:** se implementa dentro de `Modules/Sales`. Crear un módulo nuevo (`Finance`) obligaría a editar el autoload de `composer.json`; ver la decisión D8.
-
-### B. Estados
+### 2.1 Estados
 
 **`pagos.estado` (dinero):**
 
-| Estado | Significado | Hacia |
-|---|---|---|
-| `iniciado` | Intento creado en el servidor, sin orden en el proveedor | `orden_creada`, `fallido`, `expirado` |
-| `orden_creada` | Orden creada en PayPal, esperando la aprobación del cliente | `verificando`, `recibido`, `fallido`, `expirado`, `cancelado` |
-| `verificando` | Se pidió la captura pero el resultado es desconocido (*timeout* o error de red) | `recibido`, `fallido` (lo resuelve la conciliación o el webhook) |
-| `recibido` | **Dinero confirmado** por el proveedor o por el personal (presencial) | `reembolsado_parcial`, `reembolsado`, `revertido` |
-| `fallido` / `expirado` / `cancelado` | Sin dinero recibido | — (finales) |
-| `reembolsado_parcial` / `reembolsado` | Devolución total o parcial (con su fila de reembolso enlazada) | `reembolsado` |
-| `revertido` | Contracargo o reverso del proveedor | — (pasa a revisión) |
+```
+iniciado ─► orden_creada ─► verificando ─► recibido ─► reembolsado_parcial ─► reembolsado
+   │             │               │            │                └──────────────► reembolsado
+   │             │               └─► fallido   └─► revertido (contracargo)
+   ├─► fallido   ├─► fallido / cancelado / expirado
+   └─► expirado
+pendiente_verificacion ─► recibido        (transferencia / QR, al verificarlo una persona autorizada)
+                       └─► rechazado
+```
+- Tarjeta y efectivo en caja entran directamente como `recibido`, registrados por personal autorizado y con la caja abierta.
+- `verificando` **nunca** expira automáticamente.
+- Estados finales sin dinero: `fallido`, `expirado`, `cancelado`, `rechazado`.
 
-**`pagos.estado_aplicacion`:** `pendiente` → `aplicado` | `requiere_revision` → `aplicado_manual` | `no_aplica` (para reembolsos).
+**`pagos.estado_aplicacion`:** `pendiente` → `aplicado` | `requiere_revision` → `aplicado_manual`. `no_aplica` para registros históricos sin destino.
 
-Cada transición se valida en `PaymentService` (las no permitidas lanzan una excepción) y se registra en **`pago_eventos`**, que es solo de inserción.
+**`reembolsos.estado`:** `solicitado` → `autorizado` → `procesando` → `completado` | `fallido` | `incierto` (*timeout*; nunca se descarta automáticamente, lo resuelve la conciliación o el webhook). `rechazado` si el administrador no lo autoriza.
 
-**`reservas.estado_pago`** se **calcula** a partir de los pagos `recibido` y `aplicado` (cobros − reembolsos frente a `total`). **Nunca modifica `reservas.estado`**: la confirmación sigue siendo independiente del pago.
-
-### C. Esquema propuesto (migración nueva y aditiva)
-
-Para respetar "no modificar migraciones sin autorización", se propone **una migración nueva** (`2026_11_21_000001_create_pagos_tables`) en lugar de editar `2026_11_20_000001`. Elimina `pagos_externos`, que hoy está vacía y es solo de pruebas, y crea las tablas siguientes (ver D1).
-
-| Tabla | Columnas principales | Restricciones |
-|---|---|---|
-| `pagos` | `id`, `uuid` (UNIQUE, referencia pública y `custom_id`/`invoice_id` en PayPal), `tipo` (`cobro`\|`reembolso`), `pago_origen_id` (self, para reembolsos), `metodo_pago_id`, `proveedor` (`paypal`\|`manual`), `estado`, `estado_aplicacion`, **`monto` + `moneda` (BOB)**, `monto_proveedor` + `moneda_proveedor` + `tipo_cambio_id` + `tasa_aplicada`, `referencia_externa` (orden u operación), `referencia_captura`, `ci_usuario` (null), `ci_registrado_por` (null), `caja_id` (null), `nro_factura` (null), `reserva_id` (null), `snapshot` JSON (carrito o concepto, congelado), `respuesta_proveedor` JSON (saneada), `motivo_revision`, `expira_at`, `recibido_at`, `aplicado_at`, timestamps | FKs → metodoPago, NotaVenta, reservas, cajas, usuario, pagos; **UNIQUE (metodo_pago_id, referencia_externa)** y **UNIQUE (proveedor, referencia_captura)**: impiden reutilizar transacciones externas; índices (estado, expira_at), (estado_aplicacion), (ci_usuario); CHECK monto > 0 |
-| `pago_eventos` | `pago_id`, `tipo` (creado, orden_creada, captura_solicitada, recibido, aplicado, error_aplicacion, webhook, conciliado, reembolso…), `estado_anterior`, `estado_nuevo`, `datos` JSON, `ci_usuario`, `ip`, `created_at` | FK pago (restrict); solo inserción |
-| `webhook_eventos` | `proveedor`, `evento_id` (UNIQUE con proveedor), `tipo`, `firma_valida`, `payload` JSON, `procesado_at`, `resultado`, `error`, timestamps | Idempotencia de webhooks |
-| `tipos_cambio` | `moneda_origen` (BOB), `moneda_destino` (USD), `tasa` DECIMAL(12,6) (BOB por 1 USD), `vigente_desde`, `vigente_hasta` (null), `fuente`, `ci_registrado_por`, timestamps | CHECK tasa > 0; índice (origen, destino, vigente_desde) |
-
-`ReadOnlySqlGuard` y el prompt de reportes con IA se actualizarán: `pagos`, `pago_eventos` y `webhook_eventos` quedan **prohibidas** (contienen respuestas del proveedor), igual que `pagos_externos` hoy.
-
-### D. Flujo de creación y captura (PayPal, Orders API v2)
+### 2.2 Pago en línea con PayPal (servidor)
 
 ```
-1. Cliente pulsa "Pagar"  →  POST /pagos/paypal/orden            (auth, throttle)
-   Servidor:
-   a. Comprueba: PayPal configurado (client_id + secret + webhook_id), método PAYPAL activo,
-      tipo de cambio vigente. Si algo falta → no se ofrece ni se cobra nada.
-   b. Recalcula el carrito en el servidor (BOB) y congela el snapshot.
-   c. INSERT pagos (estado 'iniciado', uuid, monto BOB, monto USD, tasa)  → COMMIT
-   d. POST /v2/checkout/orders  (PayPal-Request-Id = uuid; amount USD; custom_id = invoice_id = uuid)
-   e. UPDATE pagos → 'orden_creada', referencia_externa = order_id        → COMMIT
-   f. Devuelve order_id al SDK.  ** No se reserva stock ni equipos. **
+1. POST /pagos/paypal/ordenes          (auth; cliente; throttle 10/min)
+   a. Requisitos: client_id + secret + webhook_id configurados; método PAYPAL activo;
+      tasa BOB→USD del día. Si falta algo → 422 sin llamar a PayPal ni crear el pago.
+   b. Recalcula el carrito en el servidor (BOB), congela el snapshot y calcula USD = round(BOB / tasa, 2) HALF_UP.
+   c. INSERT pagos (estado 'iniciado', uuid, monto BOB, monto USD, tipo_cambio_id, tasa, expira_at = +30 min) → COMMIT
+   d. PayPal POST /v2/checkout/orders  (intent CAPTURE; custom_id = invoice_id = uuid;
+      PayPal-Request-Id = "orden-{uuid}")
+   e. estado 'orden_creada' + referencia_externa = order_id → COMMIT;  evento 'orden_creada'
+   f. Responde {uuid, order_id}.   ** No se reserva stock ni equipos. **
 
-2. Cliente aprueba en PayPal  →  onApprove  →  POST /pagos/{uuid}/capturar   (auth; dueño del pago)
-   Servidor:
-   a. SELECT … FOR UPDATE del pago; si ya está 'recibido' → respuesta idempotente.
-   b. POST /v2/checkout/orders/{id}/capture  (PayPal-Request-Id = uuid + '-captura')
-      · timeout / 5xx → 'verificando' → COMMIT (la conciliación lo resuelve; nunca se pierde)
-      · rechazo       → 'fallido'
-   c. Verificación: status COMPLETED, captura COMPLETED, custom_id = uuid,
-      order_id = referencia_externa, moneda y monto USD exactos.
-      · Si PayPal cobró pero algo no cuadra → 'recibido' + 'requiere_revision' (el dinero queda registrado)
-   d. UPDATE pagos → 'recibido', referencia_captura, respuesta → COMMIT   ◀ PAGO ASEGURADO
+2. El cliente aprueba en PayPal (navegador). Esto NO cambia ningún estado.
 
-3. Aplicación (transacción aparte, hasta 3 reintentos ante deadlock):
-   bloquear productos → recalcular contra el snapshot → NotaVenta + detalles + stock
-   → pagos.estado_aplicacion = 'aplicado', nro_factura                  → COMMIT
-   Si falla: 'requiere_revision' + motivo + aviso al administrador. El stock no se toca.
+3. POST /pagos/{uuid}/captura          (auth; solo el dueño del pago)
+   a. SELECT … FOR UPDATE del pago (PK).
+      - Si ya está 'recibido' o en un estado posterior → respuesta idempotente (no se vuelve a capturar).
+      - Si no está en 'orden_creada' → 409.
+   b. estado 'verificando' → COMMIT (se marca ANTES de llamar a PayPal)
+   c. PayPal POST /v2/checkout/orders/{id}/capture   (PayPal-Request-Id = "captura-{uuid}")
+      · timeout / 5xx / respuesta ilegible → se queda en 'verificando' (incierto) → conciliación o webhook
+      · 4xx definitivo (rechazado, no aprobado) → 'fallido'
+   d. Verificación estricta: order.id = referencia_externa, custom_id = uuid,
+      captura COMPLETED, moneda USD y centavos exactos = monto_proveedor guardado.
+      · Si PayPal cobró pero algo no cuadra → 'recibido' + 'requiere_revision' (el dinero QUEDA registrado)
+   e. estado 'recibido', referencia_captura, recibido_at, respuesta saneada → COMMIT  ◀ PAGO ASEGURADO
+
+4. Aplicación (transacción aparte; DB::transaction(..., 3) ante deadlock)
+   AplicadorVentaEnLinea: bloquea los productos, comprueba stock y precios contra el snapshot,
+   crea NotaVenta (id_pago = PAYPAL por código) + detalles, descuenta stock, vacía el carrito.
+   → estado_aplicacion 'aplicado', nro_factura                                    → COMMIT
+   Error tras los reintentos → 'requiere_revision' + motivo (stock intacto).
 ```
 
-### E. Idempotencia
+### 2.3 Pagos presenciales (POS y, más adelante, reservas en mostrador)
 
-| Punto | Mecanismo |
+| Método | Requisitos | Estado inicial | Aplicación |
+|---|---|---|---|
+| Efectivo | `finance.payments.register` + caja abierta propia; importe recibido ≥ total; se registra el cambio | `recibido` | Inmediata (`NotaVenta` en la misma transacción) |
+| Tarjeta | Ídem + nº de autorización o *voucher* **obligatorio y único** | `recibido` | Inmediata |
+| Transferencia / QR | Ídem + **referencia bancaria obligatoria y única** | **`pendiente_verificacion`** | **Diferida** (C1): la venta se crea al verificar. Si se rechaza, no hay venta. |
+
+Las verifica un usuario con `finance.payments.verify` (admin y encargado), desde `/finanzas/pagos`, comparando con el extracto bancario. Queda constancia de `ci_verificado_por` y `verificado_at`. Si se rechaza: `rechazado` + motivo.
+
+### 2.4 Idempotencia y no duplicación
+
+| Riesgo | Mecanismo |
 |---|---|
-| Crear la orden | `PayPal-Request-Id` = uuid del pago (PayPal devuelve la misma orden si se repite) |
-| Capturar | Bloqueo de fila + "si ya está recibido, devolver el resultado" + `PayPal-Request-Id` propio |
-| Reutilizar una orden o captura | UNIQUE `(metodo_pago_id, referencia_externa)` y `(proveedor, referencia_captura)` + `custom_id` = uuid |
-| Doble clic o doble envío | Bloqueo de fila + estado; una sola `NotaVenta` |
-| Aplicar | `estado_aplicacion` comprobado bajo bloqueo |
-| Webhook | UNIQUE `(proveedor, evento_id)` |
-| Reembolso | `PayPal-Request-Id` = uuid del reembolso; suma de reembolsos ≤ importe recibido |
-| Pago presencial | UNIQUE `(metodo_pago_id, referencia_externa)`: el mismo *voucher*, transferencia o QR no se registra dos veces |
+| Crear dos órdenes por doble clic | Clave de idempotencia del cliente (`Idempotency-Key`, UUID generado por la vista) → UNIQUE `pagos.clave_idempotencia`; la segunda petición devuelve el mismo pago |
+| PayPal recibe la misma creación o captura dos veces | `PayPal-Request-Id` estable (`orden-{uuid}`, `captura-{uuid}`, `reembolso-{uuid}`) |
+| Capturar dos veces | Bloqueo de fila + estado; la segunda petición recibe la respuesta idempotente |
+| Reutilizar una orden, captura o referencia bancaria | UNIQUE `(metodo_pago_id, referencia_externa)`, UNIQUE `(proveedor, referencia_captura)`, `custom_id` = uuid |
+| Dos ventas por un pago | `estado_aplicacion` comprobado bajo bloqueo; `nro_factura` se asigna una sola vez |
+| Webhook repetido | UNIQUE `(proveedor, evento_id)` |
+| Reembolso repetido | UNIQUE `reembolsos.clave_idempotencia` + `PayPal-Request-Id`; Σ reembolsos completados + en curso ≤ recibido (comprobado bajo bloqueo del pago) |
+| POS enviado dos veces | `clave_idempotencia` del formulario |
 
-### F. Manejo de errores
+### 2.5 Tipo de cambio
 
-| Momento | ¿Hay dinero? | Resultado |
-|---|---|---|
-| Configuración incompleta, sin tipo de cambio o método inactivo | No | No se muestra el botón; los endpoints responden sin llamar a PayPal |
-| Error al crear la orden | No | `fallido`; mensaje genérico |
-| Cliente cancela o no aprueba | No | `orden_creada` → `expirado` (conciliación) |
-| *Timeout* o 5xx en la captura | Desconocido | `verificando` → conciliación o webhook |
-| Captura rechazada | No | `fallido` |
-| Captura correcta pero datos que no cuadran | **Sí** | `recibido` + `requiere_revision` |
-| Fallo al crear la venta (stock, *deadlock* tras reintentos) | **Sí** | `recibido` + `requiere_revision`; stock intacto |
-
-En todos los casos: se registra un `pago_eventos`, un log técnico sin secretos y un mensaje genérico al usuario. Nunca se devuelve la respuesta cruda del proveedor.
-
-### G. Conciliación
-Comando `php artisan pagos:conciliar`. En Docker se programa con el perfil `workers`; en local se ejecuta a mano.
-1. `iniciado` u `orden_creada` con `expira_at` vencido → consulta la orden; si no está capturada → `expirado`.
-2. `verificando` → `GET` de la orden o captura → `recibido` o `fallido`.
-3. `recibido` + `pendiente` → reintenta la aplicación.
-4. `requiere_revision` → lista e informe.
-
-**Pantalla de administración** (`/admin/pagos`): filtros por estado, detalle con el *snapshot* y el historial de eventos, y las acciones "Reintentar aplicación", "Marcar aplicado manualmente" (con motivo) y "Reembolsar". Requiere los permisos `payments.view`, `payments.refund` y `payments.reconcile` (permisos nuevos; ver D9).
-
-### H. Webhooks firmados
-- `POST /webhooks/paypal`: sin sesión ni CSRF (excepción en `bootstrap/app.php`), con `throttle`.
-- La firma se verifica con `POST /v1/notifications/verify-webhook-signature`, usando las cabeceras `PAYPAL-TRANSMISSION-*` y `PAYPAL_WEBHOOK_ID`. Si es inválida → **400**, se registra en `webhook_eventos` con `firma_valida=false` y no se procesa.
-- Si es válida: se guarda en `webhook_eventos` (idempotente por `evento_id`) y se responde **200** aunque el procesamiento falle; la conciliación lo reintenta.
-
-| Evento | Acción |
+| Regla | Implementación |
 |---|---|
-| `PAYMENT.CAPTURE.COMPLETED` | Pago `verificando`/`orden_creada` → `recibido` (y aplicación) |
-| `PAYMENT.CAPTURE.DENIED` / `DECLINED` | → `fallido` |
-| `PAYMENT.CAPTURE.REFUNDED` | Crea o confirma la fila de reembolso → `reembolsado(_parcial)` |
+| Quién | Solo `finance.exchange.manage` (administrador) |
+| Definición | `tasa` = **BOB por 1 USD**, DECIMAL(12,6) > 0 |
+| Vigencia | Una fila por `fecha_aplicacion` (fecha de La Paz); UNIQUE `(moneda_base, moneda_cotizada, fecha_aplicacion)`. El pago usa la tasa de la fecha en que se crea el intento. **No se hereda la tasa del día anterior.** |
+| Conversión | `usd = round(bob / tasa, 2)` HALF_UP; BOB también a 2 decimales. Se guardan en el pago `monto`, `monto_proveedor`, `tipo_cambio_id` y `tasa_aplicada`. |
+| Sin tasa del día | El botón de PayPal no se muestra y el endpoint responde 422. **Nunca hay una tasa por defecto.** |
+| Modificar | Se permite **solo si ningún pago la usó**. Cada cambio deja una fila en `tipo_cambio_revisiones` (tasa anterior y nueva, quién, motivo) y en la bitácora. Si ya se usó, solo se puede crear la de otro día. |
+| Transparencia | El carrito muestra "Total Bs. X → se cobrará USD Y (tasa Z del dd/mm/aaaa)". |
+| Reembolsos | El USD se calcula con la **`tasa_aplicada` original del pago**, nunca con la de hoy. En el último reembolso se usa el USD restante exacto, para que no haya deriva por redondeo. |
+
+### 2.6 Conciliación (`php artisan finanzas:conciliar`, cada 5 minutos)
+1. **Expiración** (solo `iniciado` y `orden_creada` con `expira_at` vencido):
+   - `iniciado` → `expirado`.
+   - `orden_creada` → **primero se consulta la orden en PayPal**:
+     - `COMPLETED` → `recibido` (y se aplica);
+     - `APPROVED` → se captura en el servidor (paso 3 de §2.2);
+     - no aprobada, anulada o inexistente → `expirado`;
+     - error de red o API → **no se toca** (se reintenta en la siguiente ejecución).
+2. **`verificando`** → consulta la orden y la captura → `recibido` o `fallido`. **Nunca `expirado`.** Si sigue incierto, se marca para revisión a partir de 24 h, sin cambiar su estado de dinero.
+3. **`recibido` + `pendiente`** (en línea) → reintenta la aplicación.
+4. **Reembolsos `incierto` o `procesando`** → consulta el reembolso en PayPal.
+5. **Webhooks guardados pero no procesados** → se reprocesan.
+6. Cada acción escribe `pago_eventos` (o un evento de reembolso).
+
+**Pantalla `/finanzas/pagos`:** filtros por estado y método; detalle con *snapshot*, eventos y reembolsos; acciones según el permiso: verificar o rechazar, reintentar la aplicación, aplicar a mano con motivo, solicitar o autorizar un reembolso.
+
+### 2.7 Devoluciones de ventas cobradas
+
+`DevolucionController@aprobar` pasa a hacer esto:
+1. Valida las cantidades: `devuelto acumulado + esta devolución ≤ vendido`, por línea.
+2. **No modifica `NotaVenta` ni `detalleNotaVenta`.** El historial original se conserva.
+3. Guarda en `devolucion_detalles` el `precio_unitario` neto (con el descuento de la línea) y el `subtotal`; en `devoluciones`, `monto_total`, `ci_aprobado_por` y `aprobado_at`.
+4. Repone el stock (como hoy).
+5. Si es de tipo "Devolución" y la venta tiene pagos `recibido`:
+   - **pagada por PayPal** → crea un `reembolso` `solicitado`, vinculado a la devolución, que debe autorizar un administrador (§2.8);
+   - **pagada en caja** → crea un `reembolso` presencial que se completa cuando el personal confirma que devolvió el dinero (C3).
+
+   Si es "Garantía" → sin reembolso.
+6. El neto de una venta se calcula como `NotaVenta.total − Σ reembolsos completados`, en las vistas y reportes.
+
+### 2.8 Reembolsos (PayPal y presenciales)
+
+```
+Solicitar (finance.refunds.request: admin, encargado)  → reembolsos 'solicitado' (motivo, monto BOB ≤ disponible)
+Autorizar y ejecutar (finance.refunds.execute: admin)  → 'autorizado' → 'procesando' → COMMIT
+   PayPal POST /v2/payments/captures/{captura}/refund  (amount USD con la tasa original;
+   PayPal-Request-Id = "reembolso-{uuid}")
+   · COMPLETED → 'completado' + referencia_externa (refund id); el pago pasa a 'reembolsado_parcial' o 'reembolsado'
+   · PENDING   → 'procesando' (lo cierra la conciliación o el webhook)
+   · timeout/5xx → 'incierto' (nunca se descarta; la conciliación consulta)
+   · 4xx       → 'fallido' + motivo
+Presencial: 'autorizado' → 'completado' al confirmar la entrega del dinero (en efectivo, con la caja abierta).
+```
+Un administrador puede hacer los dos pasos a la vez. Toda acción queda en `pago_eventos` y en la bitácora (quién, cuándo, cuánto, motivo).
+
+### 2.9 Webhooks firmados
+- `POST /webhooks/paypal`: sin sesión; con excepción de CSRF **solo** para esa ruta (`bootstrap/app.php`); `throttle:120,1`.
+- **Verificación:** `POST /v1/notifications/verify-webhook-signature` con las cabeceras `PAYPAL-TRANSMISSION-ID/-TIME/-SIG`, `PAYPAL-CERT-URL`, `PAYPAL-AUTH-ALGO` y `PAYPAL_WEBHOOK_ID`.
+- Si es inválida → **400**, se registra con `firma_valida = false` y no se procesa.
+- Si es válida → se guarda (idempotente por `evento_id`) y responde **200**. El procesamiento va aparte; si falla, la conciliación lo reintenta.
+
+| Evento | Efecto |
+|---|---|
+| `PAYMENT.CAPTURE.COMPLETED` | `orden_creada`/`verificando` → `recibido` (comprobando `custom_id`, monto y moneda) → aplicar |
+| `PAYMENT.CAPTURE.DENIED` | → `fallido` |
+| `PAYMENT.CAPTURE.PENDING` | se mantiene `verificando` (incierto) |
+| `PAYMENT.CAPTURE.REFUNDED` | completa el reembolso correspondiente, o crea uno **registrado externamente** si se hizo en el panel de PayPal, y recalcula el estado del pago |
 | `PAYMENT.CAPTURE.REVERSED` | → `revertido` + `requiere_revision` |
-| `CHECKOUT.ORDER.APPROVED` | Si el navegador se cerró antes de capturar, el servidor captura (paso 2) |
+| `CHECKOUT.ORDER.APPROVED` | si la orden sigue en `orden_creada`, el servidor captura (navegador cerrado a mitad) |
 
-### I. Conversión BOB → USD (necesaria, porque PayPal no admite BOB)
-- **Fuente explícita:** tabla `tipos_cambio`, registrada por un administrador. **No hay tasa por defecto en el código.** Sin una tasa vigente, el pago en línea queda desactivado.
-- **Definición:** `tasa` = BOB por 1 USD. `monto_usd = round(monto_bob / tasa, 2)` con redondeo `HALF_UP` (ver D2).
-- **Verificable:** cada pago guarda `monto` (BOB), `monto_proveedor` (USD), `tipo_cambio_id` y `tasa_aplicada`. La captura se compara contra el USD **guardado**, no contra uno recalculado.
-- **Transparencia:** el carrito muestra "Total Bs. X — se cobrará USD Y (tipo de cambio Z al dd/mm/aaaa)".
-- `NotaVenta.total` sigue en BOB.
-
-### J. Pagos presenciales (Efectivo, Tarjeta, Transferencia, QR)
-- El POS crea, **en la misma transacción** que la `NotaVenta`, un `pago` con estado `recibido` y `aplicado`, `ci_registrado_por` y `caja_id` (caja abierta del usuario).
-- Tarjeta, Transferencia y QR **exigen referencia** (nº de autorización u operación), que es única por método.
-- Efectivo: importe recibido y cambio.
-- La "verificación" es la del personal autorizado (ver D3 para transferencia y QR).
-
-### K. Reembolsos
-- Fila `pagos` con `tipo = reembolso` y `pago_origen_id`; total o parcial, con la suma acumulada ≤ importe recibido.
-- PayPal: `POST /v2/payments/captures/{id}/refund` con `PayPal-Request-Id`. Presencial: solo registro.
-- Todo reembolso queda en `pago_eventos` y en la bitácora.
-- **Devoluciones de ventas (D5):** en lugar de modificar la nota en silencio, generarían un reembolso enlazado.
+### 2.10 Reservas
+- Pagos con `reserva_id`. `AplicadorReserva` recalcula `reservas.estado_pago`: Σ recibidos − Σ reembolsos completados frente a `total` → `pendiente`, `parcial`, `pagado` o `reembolsado`.
+- **Nunca cambia `reservas.estado`.** Confirmar sigue siendo independiente del pago, y pagar no bloquea equipos.
+- Las pantallas de reservas corresponden a su propia etapa; aquí solo se implementan el servicio y sus pruebas.
 
 ---
 
-## L. Archivos
+## 3. Migraciones propuestas (todas nuevas, en `Modules/Finance/database/migrations/`)
 
-### Nuevos
-| Archivo | Propósito |
+Se ejecutan después de las 31 actuales: el orden es global, por nombre de archivo.
+
+### 3.1 `2026_11_22_000001_create_tipos_cambio_tables.php`
+| Tabla | Columnas | Restricciones |
+|---|---|---|
+| `tipos_cambio` | `id`; `moneda_base` CHAR(3) = 'USD'; `moneda_cotizada` CHAR(3) = 'BOB'; `tasa` DECIMAL(12,6); `fecha_aplicacion` DATE; `fuente` VARCHAR(150) null; `ci_registrado_por` INT; timestamps | UNIQUE (base, cotizada, fecha); FK `ci_registrado_por` → usuario (restrict); CHECK `tasa > 0` |
+| `tipo_cambio_revisiones` | `id`; `tipo_cambio_id`; `tasa_anterior`, `tasa_nueva` DECIMAL(12,6); `motivo` VARCHAR(255); `ci_usuario` INT; `created_at` | FK → tipos_cambio (restrict), usuario (restrict) |
+
+### 3.2 `2026_11_22_000002_create_pagos_tables.php`
+| Tabla | Columnas | Restricciones e índices |
+|---|---|---|
+| `pagos` | `id`; `uuid` CHAR(36); `clave_idempotencia` VARCHAR(80) null; `canal` ENUM(en_linea, presencial); `proveedor` VARCHAR(30) (`paypal` \| `manual`); `metodo_pago_id` INT; **`estado`** ENUM(iniciado, orden_creada, verificando, pendiente_verificacion, recibido, fallido, expirado, cancelado, rechazado, reembolsado_parcial, reembolsado, revertido); **`estado_aplicacion`** ENUM(pendiente, aplicado, requiere_revision, aplicado_manual, no_aplica); **`monto`** DECIMAL(12,2) + **`moneda`** CHAR(3) = 'BOB'; `monto_recibido_efectivo` DECIMAL(12,2) null; `cambio_entregado` DECIMAL(12,2) null; `monto_proveedor` DECIMAL(12,2) null + `moneda_proveedor` CHAR(3) null; `tipo_cambio_id` null; `tasa_aplicada` DECIMAL(12,6) null; `referencia_externa` VARCHAR(100) null (orden PayPal o referencia bancaria/voucher); `referencia_captura` VARCHAR(100) null; `ci_usuario` INT null (pagador); `ci_registrado_por` INT null; `ci_verificado_por` INT null; `caja_id` BIGINT null; `nro_factura` INT null; `reserva_id` BIGINT null; `snapshot` JSON null; `respuesta_proveedor` JSON null (saneada); `motivo_revision` TEXT null; `motivo_rechazo` VARCHAR(255) null; `legacy_pago_externo_id` BIGINT null; `expira_at`, `recibido_at`, `verificado_at`, `aplicado_at` DATETIME null; timestamps | UNIQUE `uuid`; UNIQUE `clave_idempotencia`; **UNIQUE (metodo_pago_id, referencia_externa)**; **UNIQUE (proveedor, referencia_captura)**; UNIQUE `legacy_pago_externo_id`; FKs **restrict** → metodoPago, tipos_cambio, usuario ×3, cajas, NotaVenta(nro), reservas, pagos_externos; índices (estado, expira_at), (estado_aplicacion), (ci_usuario), (caja_id), (reserva_id), (nro_factura); CHECK `monto > 0`, `monto_proveedor IS NULL OR monto_proveedor > 0` |
+| `pago_eventos` | `id`; `pago_id`; `tipo` VARCHAR(50); `estado_anterior`, `estado_nuevo` VARCHAR(30) null; `estado_aplicacion_anterior`, `estado_aplicacion_nuevo` VARCHAR(30) null; `datos` JSON null; `ci_usuario` INT null; `ip` VARCHAR(45) null; `created_at` | FK pago (restrict); índice (pago_id, created_at). **Solo inserción** (el modelo no permite update ni delete). |
+
+### 3.3 `2026_11_22_000003_create_reembolsos_table.php`
+| Columnas | Restricciones |
 |---|---|
-| `database/migrations/2026_11_21_000001_create_pagos_tables.php` | `pagos`, `pago_eventos`, `webhook_eventos`, `tipos_cambio`; elimina `pagos_externos` (D1) |
-| `config/pagos.php` | Moneda operativa `BOB`, expiración de intentos, reintentos, proveedores habilitados |
-| `Modules/Sales/app/Models/{Pago, PagoEvento, WebhookEvento, TipoCambio}.php` | Modelos |
-| `Modules/Sales/app/Payments/EstadoPago.php`, `EstadoAplicacion.php` | Enums PHP de estados + transiciones válidas |
-| `Modules/Sales/app/Payments/Contracts/PaymentGateway.php` | `crearOrden`, `capturar`, `consultarOrden`, `reembolsar`, `verificarWebhook` |
-| `Modules/Sales/app/Payments/PayPal/{PayPalClient, PayPalGateway}.php` | HTTP, OAuth con token en caché, *timeouts*, cabeceras de idempotencia |
-| `Modules/Sales/app/Payments/{PaymentService, ConversionService}.php` | Orquestación y conversión explícita |
-| `Modules/Sales/app/Payments/Aplicadores/{VentaEnLinea, PagoReserva}.php` | Generar la venta y recalcular `reservas.estado_pago` |
-| `Modules/Sales/app/Http/Controllers/{PagoEnLineaController, PayPalWebhookController}.php` | Crear y capturar; webhook |
-| `Modules/Sales/app/Http/Controllers/Admin/{PagoController, TipoCambioController}.php` | Conciliación, reembolsos, tipos de cambio |
-| `Modules/Sales/app/Console/ConciliarPagos.php` | `pagos:conciliar` |
-| `resources/views/admin/pagos/{index, show}.blade.php`, `resources/views/admin/tipos-cambio/index.blade.php` | Administración |
-| `tests/Feature/Pagos/*.php`, `tests/Unit/Pagos/*.php` | Pruebas (§M) |
+| `id`; `uuid`; `clave_idempotencia`; `pago_id`; `devolucion_id` BIGINT null; `estado` ENUM(solicitado, autorizado, procesando, completado, fallido, incierto, rechazado); `monto` DECIMAL(12,2) BOB; `monto_proveedor` DECIMAL(12,2) null + `moneda_proveedor` CHAR(3) null; `tasa_aplicada` DECIMAL(12,6) null (copiada del pago); `origen` ENUM(aplicacion, externo_webhook); `referencia_externa` VARCHAR(100) null (refund id); `motivo` VARCHAR(255); `ci_solicitado_por`, `ci_autorizado_por` INT null; `respuesta_proveedor` JSON null; `solicitado_at`, `autorizado_at`, `completado_at` DATETIME null; timestamps | UNIQUE `uuid`, `clave_idempotencia`, `referencia_externa`; FKs restrict → pagos, devoluciones, usuario; índice (estado); CHECK `monto > 0` |
 
-### Modificados
+Los eventos de reembolso se registran en `pago_eventos` del pago correspondiente (tipo `reembolso_*`).
+
+### 3.4 `2026_11_22_000004_create_webhook_eventos_table.php`
+| Columnas | Restricciones |
+|---|---|
+| `id`; `proveedor` VARCHAR(30); `evento_id` VARCHAR(100); `tipo` VARCHAR(100); `firma_valida` BOOLEAN; `payload` JSON; `cabeceras` JSON (sin datos sensibles); `pago_id` null; `procesado_at` null; `intentos` INT default 0; `resultado` VARCHAR(30) null; `error` TEXT null; timestamps | UNIQUE (proveedor, evento_id); FK pago (restrict, null); índice (procesado_at) |
+
+### 3.5 `2026_11_22_000005_add_importes_to_devoluciones_tables.php` (solo añade columnas)
+| Tabla | Columnas nuevas |
+|---|---|
+| `devoluciones` | `monto_total` DECIMAL(12,2) null; `ci_aprobado_por` INT null (FK usuario); `aprobado_at` DATETIME null |
+| `devolucion_detalles` | `precio_unitario` DECIMAL(12,2) null; `subtotal` DECIMAL(12,2) null |
+
+### 3.6 `2026_11_22_000006_transferir_pagos_externos_a_pagos.php`: transición segura
+- **No elimina `pagos_externos`, ni sus filas, ni su migración.** Queda como histórico de solo lectura; el código deja de escribir en ella.
+- **Copia** cada fila a `pagos`, de forma idempotente por `legacy_pago_externo_id` UNIQUE:
+
+| `pagos_externos.estado` | → `pagos.estado` / `estado_aplicacion` |
+|---|---|
+| `aplicado` | `recibido` / `aplicado` (con su `nro_factura`) |
+| `requiere_reembolso` | `recibido` / `requiere_revision` (motivo: "Migrado desde pagos_externos") |
+| otro | `recibido` / `requiere_revision` |
+
+- Método PAYPAL resuelto por código. Si falta, la migración **se detiene sin copiar nada**.
+- Cada copia genera un `pago_eventos` de tipo `migrado_desde_pagos_externos`.
+- `down()`: borra **solo las copias** (`legacy_pago_externo_id IS NOT NULL`) si no tienen reembolsos ni eventos posteriores a la migración; si los tienen, se niega (excepción) para no perder historial.
+- En `sound_management_test` y en `sound_management_db` la tabla está vacía; la transición se prueba insertando filas ficticias en la base de pruebas.
+
+**No se modifica ninguna migración existente.**
+
+---
+
+## 4. Permisos (`config/access.php` + `PermisoSeeder`, con `insertOrIgnore`)
+
+| Permiso | Admin | Encargado | Vendedor | Técnico, Almacenero, Cliente |
+|---|:-:|:-:|:-:|:-:|
+| `finance.payments.view_all` (todos los pagos) | ✅ | ✅ | — | — |
+| `finance.payments.view_own` (los registrados por él en su caja) | ✅ | ✅ | ✅ | — |
+| `finance.payments.register` (cobro presencial) | ✅ | ✅ | ✅ | — |
+| `finance.payments.verify` (transferencia/QR) | ✅ | ✅ | — | — |
+| `finance.payments.reconcile` (reintentar, aplicar a mano, conciliación) | ✅ | ✅ | — | — |
+| `finance.refunds.request` | ✅ | ✅ | — | — |
+| `finance.refunds.execute` (autorizar y ejecutar) | ✅ | — | — | — |
+| `finance.exchange.manage` (tipos de cambio) | ✅ | — | — | — |
+| `finance.audit.view` (eventos, webhooks, histórico) | ✅ | — | — | — |
+
+- El cliente solo ve y captura **sus propios** pagos en línea. Es una regla de propiedad (`ci_usuario`), no un permiso financiero.
+- `PermisoSeeder` añade los permisos y sus asignaciones por defecto con `insertOrIgnore`: **no quita ni cambia** asignaciones personalizadas existentes, y los roles personalizados **no reciben** permisos financieros por defecto.
+- **Nota:** hoy los Gates se evalúan desde `config/access.php`; pasar a leer `rol_permiso` es de la Etapa 3. Hasta entonces, un rol personalizado no tiene permisos financieros salvo que se añada a la matriz. Es coherente con "no conceder por defecto".
+
+---
+
+## 5. Archivos
+
+### 5.1 Nuevos (módulo `Modules/Finance`)
+| Ruta | Contenido |
+|---|---|
+| `module.json`, `composer.json`, `config/config.php` | Registro del módulo y configuración (`moneda_operativa` BOB, `expiracion_minutos` 30, `reintentos_aplicacion` 3, `verificando_alerta_horas` 24) |
+| `app/Providers/{FinanceServiceProvider, RouteServiceProvider, EventServiceProvider}.php` | Comandos, tarea programada y *binding* `PaymentGateway → PayPalGateway` |
+| `routes/web.php` | Rutas de §5.3 |
+| `database/migrations/` (6) | §3 |
+| `app/Models/{Pago, PagoEvento, Reembolso, TipoCambio, TipoCambioRevision, WebhookEvento}.php` | Modelos (`PagoEvento` solo inserción) |
+| `app/Support/Dinero.php`, `app/Enums/*.php` | Valor monetario y estados |
+| `app/Services/{PagoService, ReembolsoService, TipoCambioService, ConciliacionService}.php` | Lógica |
+| `app/Aplicadores/{AplicadorPago, AplicadorVentaEnLinea, AplicadorVentaPresencial, AplicadorReserva}.php` | Aplicación a venta o reserva |
+| `app/Gateways/PaymentGateway.php`, `app/Gateways/PayPal/{PayPalClient, PayPalGateway}.php` | Proveedor |
+| `app/Webhooks/PayPalWebhookProcessor.php` | Procesamiento de eventos |
+| `app/Http/Controllers/{PagoEnLineaController, PayPalWebhookController}.php` | En línea y webhook |
+| `app/Http/Controllers/Admin/{PagoController, ReembolsoController, TipoCambioController}.php` | Administración |
+| `app/Console/ConciliarPagos.php` | `finanzas:conciliar` |
+| `resources/views/{pagos/index, pagos/show, tipos-cambio/index}.blade.php` | Pantallas (con `@can` coherentes con las rutas) |
+| `tests/Feature/*.php`, `tests/Unit/*.php` | §6 (se añade `Modules/*/tests` a `phpunit.xml`) |
+
+### 5.2 Modificados
 | Archivo | Cambio |
 |---|---|
-| `Modules/Sales/routes/web.php` | Rutas nuevas; `carrito.checkout` antiguo redirige al flujo nuevo |
-| `bootstrap/app.php` | Excepción CSRF solo para `webhooks/paypal` |
-| `Modules/Sales/app/Http/Controllers/CartController.php` | Se retira la lógica de `checkout()` (pasa a `PaymentService`); el carrito no cambia |
-| `resources/views/carrito/index.blade.php` | El SDK usa `createOrder` y `onApprove` del servidor; se muestran BOB, USD y la tasa |
-| `Modules/Sales/app/Http/Controllers/VentaController.php` | El POS registra un `pago` presencial con referencia (J) |
-| `Modules/Procurement/app/Http/Controllers/DevolucionController.php` | Reembolso enlazado (solo si se aprueba D5) |
-| `Modules/Sales/app/Providers/SalesServiceProvider.php` | Registrar el comando y el *binding* de `PaymentGateway` |
-| `config/services.php`, `.env.example` | `PAYPAL_WEBHOOK_ID`; la moneda del proveedor deja de usarse para importes en BOB |
-| `config/access.php`, `database/seeders/PermisoSeeder.php` | Permisos `payments.view`, `payments.refund`, `payments.reconcile`, `exchange.manage` (D9) |
-| `Modules/Audit/app/Services/ReadOnlySqlGuard.php` | Prohibir las tablas nuevas en los reportes con IA |
-| `tests/Feature/Instalacion/{MetodoPagoTest, EsquemaInstalacionTest, SeedersInstalacionTest}.php` | Adaptar a las tablas y rutas nuevas |
-| `routes/console.php` | Programar `pagos:conciliar` |
+| `modules_statuses.json` | `"Finance": true` |
+| `bootstrap/app.php` | Excepción de CSRF **solo** para `webhooks/paypal` |
+| `Modules/Sales/routes/web.php` | `carrito.checkout` (antiguo) ya no registra ventas: redirige al carrito con un aviso |
+| `Modules/Sales/app/Http/Controllers/CartController.php` | Se retira la lógica de cobro de `checkout()`; `index()` pasa a la vista la disponibilidad del pago, el total en USD y la tasa |
+| `resources/views/carrito/index.blade.php` | El SDK usa `createOrder` y `onApprove` contra `/pagos/paypal/…`; se muestran BOB, USD y la tasa; `Idempotency-Key` |
+| `Modules/Sales/app/Http/Controllers/VentaController.php` + `resources/views/ventas/create.blade.php` | El POS registra el pago presencial mediante `PagoService` (referencia, efectivo recibido y cambio, clave de idempotencia) |
+| `Modules/Procurement/app/Http/Controllers/DevolucionController.php` | §2.7 (sin modificar notas) |
+| `resources/views/components/admin-sidebar.blade.php` | Enlaces "Pagos" y "Tipos de cambio" con `@can` |
+| `config/services.php`, `.env.example` | `PAYPAL_WEBHOOK_ID`; `PAYPAL_CURRENCY` pasa a ser solo la moneda del proveedor |
+| `config/access.php`, `database/seeders/PermisoSeeder.php` | Permisos de §4 |
+| `Modules/Audit/app/Services/ReadOnlySqlGuard.php` | Prohíbe `pagos`, `pago_eventos`, `reembolsos` y `webhook_eventos` en los reportes con IA |
+| `phpunit.xml` | Incluir `Modules/*/tests` |
+| `tests/Feature/Instalacion/{EsquemaInstalacionTest, SeedersInstalacionTest, MetodoPagoTest}.php` | Tablas y permisos nuevos; el checkout antiguo ya no registra ventas |
 
-### Eliminados (justificación)
-| Archivo | Motivo |
+### 5.3 Rutas
+| Método y ruta | Acceso |
 |---|---|
-| `Modules/Sales/app/Services/PayPalOrderVerifier.php` | Lo sustituye `PayPalGateway` (crear y capturar en el servidor) |
-| `Modules/Sales/app/Models/PagoExterno.php` | Lo sustituye `Pago`; la tabla `pagos_externos` está vacía y nunca se usó en producción |
+| `POST /pagos/paypal/ordenes` | Autenticado (dueño), `throttle:10,1` |
+| `POST /pagos/{uuid}/captura` | Autenticado, **solo el dueño**, `throttle:10,1` |
+| `GET /pagos/{uuid}/estado` | Autenticado, solo el dueño |
+| `POST /webhooks/paypal` | Público, firma verificada, sin CSRF, `throttle:120,1` |
+| `GET /finanzas/pagos`, `GET /finanzas/pagos/{uuid}` | `view_all` o `view_own` (filtrado) |
+| `POST /finanzas/pagos/{uuid}/verificar` · `/rechazar` | `finance.payments.verify` |
+| `POST /finanzas/pagos/{uuid}/reintentar` · `/aplicar-manual` | `finance.payments.reconcile` |
+| `POST /finanzas/pagos/{uuid}/reembolsos` | `finance.refunds.request` |
+| `POST /finanzas/reembolsos/{uuid}/autorizar` · `/rechazar` · `/confirmar-entrega` | `finance.refunds.execute` |
+| `GET/POST /finanzas/tipos-cambio`, `PUT /finanzas/tipos-cambio/{id}` | `finance.exchange.manage` |
 
-**No cambia:** `composer.json`, `composer.lock`, Laravel ni las dependencias. Se usa solo `Http` de Laravel (Guzzle ya está instalado).
+### 5.4 Se conservan sin borrar
+- `Modules/Sales/app/Models/PagoExterno.php` y la tabla `pagos_externos`: histórico de solo lectura.
+- `Modules/Sales/app/Services/PayPalOrderVerifier.php`: se deja de usar y se marca obsoleto. Se eliminará cuando lo autorices.
+
+### 5.5 No cambia
+`composer.json`, `composer.lock`, Laravel, las dependencias, las migraciones existentes, los alquileres heredados ni `reservas.estado`.
 
 ---
 
-## M. Pruebas automatizadas (todas con `Http::fake`, sin red ni credenciales reales)
+## 6. Pruebas automatizadas (PayPal siempre con `Http::fake()`)
 
-Se ejecutan con `.tools\ejecutar-pruebas.ps1`, en SQLite y en `127.0.0.1:3310/sound_management_test`.
-
-| # | Escenario | Comprobación |
+| # | Grupo | Casos |
 |---|---|---|
-| 1 | Conversión | Tasa 6.96 → USD redondeado HALF_UP; sin tasa vigente → pago en línea no disponible |
-| 2 | Crear la orden | La petición a PayPal lleva USD, `custom_id` = uuid y `PayPal-Request-Id`; pago `orden_creada`; **stock y equipos sin cambios** |
-| 3 | Captura correcta | `recibido` → `aplicado`; `NotaVenta` con `id_pago` = PAYPAL; stock descontado; carrito vacío; eventos registrados |
-| 4 | Doble captura o doble clic | Una sola `NotaVenta` y un solo `recibido` |
-| 5 | Orden ajena o reutilizada | Rechazada (`custom_id` distinto o UNIQUE) |
-| 6 | Monto o moneda distintos tras capturar | `recibido` + `requiere_revision`; sin venta |
-| 7 | *Timeout* o 500 en la captura | `verificando`; luego `pagos:conciliar` con la orden COMPLETED → `recibido` → `aplicado` |
-| 8 | Stock insuficiente tras capturar | `recibido` + `requiere_revision`; stock intacto |
-| 9 | Excepción en el aplicador (simula *deadlock*) | Reintentos y después `requiere_revision`; el pago se conserva |
-| 10 | Webhook con firma inválida | 400; nada procesado |
-| 11 | Webhook válido `CAPTURE.COMPLETED` para un pago `verificando` | `recibido`; el mismo `evento_id` repetido se ignora |
-| 12 | Webhook `REFUNDED` / `REVERSED` | Fila de reembolso / `revertido` + revisión |
-| 13 | Expiración | `orden_creada` vencida → `expirado`; sin efecto en el stock |
-| 14 | Reembolso total o parcial (admin) | Fila enlazada; no supera lo recibido; usuario sin permiso → 403 |
-| 15 | Acceso | Un cliente no ve ni captura pagos de otro; las rutas de admin exigen permiso |
-| 16 | POS presencial | Referencia obligatoria para tarjeta, transferencia y QR; referencia repetida rechazada; exige caja abierta |
-| 17 | Pago de reserva | Actualiza `estado_pago` (parcial o pagado) **sin cambiar `estado`** |
-| 18 | Configuración incompleta | Sin botón; los endpoints no llaman a PayPal |
-| 19 | Regresión | Las 29 pruebas de la Etapa 1 siguen en verde |
+| 1 | Dinero y conversión | Centavos; HALF_UP; `round(bob / tasa, 2)`; sin tasa del día → no disponible; la tasa del día anterior no se usa |
+| 2 | Tipos de cambio | Solo el admin registra (encargado y vendedor → 403); uno por día; editar una tasa usada → rechazado; editar una no usada → revisión registrada |
+| 3 | Crear la orden | Petición a PayPal con USD, `custom_id` = uuid y `PayPal-Request-Id`; pago `orden_creada`; stock y equipos sin cambios; misma `Idempotency-Key` → mismo pago |
+| 4 | Captura correcta | `verificando` → `recibido` → `aplicado`; `NotaVenta` (PAYPAL por código); stock; carrito; eventos en orden |
+| 5 | El navegador "dice aprobado" | Sin llamar a la captura, el pago **sigue en `orden_creada`**; ninguna ruta acepta un estado enviado por el cliente |
+| 6 | Doble captura, doble clic, concurrencia | Una sola captura en PayPal (`Http::assertSentCount`), una `NotaVenta` |
+| 7 | Orden ajena o reutilizada | `custom_id` o dueño distintos → rechazada; referencia repetida → UNIQUE |
+| 8 | Captura que no cuadra (monto, moneda, `custom_id`) | `recibido` + `requiere_revision`; sin venta |
+| 9 | *Timeout* o 5xx en la captura | Se queda en `verificando`; la conciliación con la orden `COMPLETED` → `recibido` → `aplicado`; **con la orden en error, no expira** |
+| 10 | Fallo posterior (stock, excepción simulada en el aplicador) | Reintentos → `requiere_revision`; **el pago `recibido` no se borra ni cambia de estado de dinero** |
+| 11 | Expiración | `iniciado` y `orden_creada` sin aprobar > 30 min → `expirado`; `orden_creada` `APPROVED` → se captura; `verificando` → **nunca** expira |
+| 12 | Webhooks | Firma inválida → 400 sin procesar; válido `CAPTURE.COMPLETED` → `recibido`; `evento_id` repetido → ignorado; `REFUNDED` externo → reembolso `externo_webhook`; `REVERSED` → `revertido` + revisión |
+| 13 | Reembolsos | Solicitar (encargado) y ejecutar (solo admin); parcial y total; Σ ≤ recibido; idempotencia (misma clave → un reembolso y una llamada); *timeout* → `incierto`, que no se descarta; USD con la tasa original; último parcial sin deriva |
+| 14 | Presencial | Efectivo y tarjeta → `recibido` con caja abierta; tarjeta sin referencia → 422; transferencia y QR → `pendiente_verificacion` **sin venta**; verificar (encargado) → `recibido` + venta; rechazar → sin venta; referencia repetida → rechazada; doble envío del POS → un pago |
+| 15 | Permisos | Matriz §4 por rol; el vendedor solo ve sus pagos; técnico, almacenero y cliente → 403 en `/finanzas/*`; un rol personalizado sin permisos → 403; el sembrado no quita permisos personalizados |
+| 16 | Devoluciones | Aprobar **no modifica** `NotaVenta` ni sus detalles (comparación antes y después); guarda importes; crea el reembolso vinculado; las cantidades acumuladas no superan lo vendido; una garantía no genera reembolso |
+| 17 | Reservas | El pago actualiza `estado_pago` (parcial o pagado) y **no** `estado`; no crea `reserva_equipos` |
+| 18 | Transición de `pagos_externos` | Filas ficticias → copias con el mapeo de §3.6; la migración repetida no duplica; `pagos_externos` intacta; `down()` se niega si hay historial posterior |
+| 19 | Configuración incompleta | Sin `secret` o `webhook_id` → sin botón; los endpoints no llaman a PayPal |
+| 20 | Regresión | Las 29 pruebas de la Etapa 1 siguen en verde (adaptadas a las tablas nuevas) |
+
+Se ejecutan con `.tools\ejecutar-pruebas.ps1` (SQLite) y `-Motor mysql` (`127.0.0.1:3310/sound_management_test`, mostrando antes la conexión). La salvaguarda de `tests/TestCase.php` sigue activa.
 
 ---
 
-## N. Riesgos
+## 7. Riesgos y mitigación
 | Riesgo | Mitigación |
 |---|---|
-| Cambiar el flujo del checkout rompe la compra en línea | Hoy está desactivado sin credenciales; las pruebas 2 a 9 cubren el flujo nuevo |
-| Errores de redondeo en la conversión | Centavos enteros; el USD se guarda y se compara contra lo guardado |
-| Webhooks que llegan antes que la captura del navegador | Bloqueo de fila e idempotencia por estado |
-| Cambios en el POS afectan a la caja | El POS solo **añade** el registro de pago; la lógica de caja se ajusta en la Etapa 3 |
-| Diferencias de la API real de PayPal frente a lo simulado | Las pruebas se basan en la documentación de Orders v2; la validación real queda para *sandbox* con credenciales de prueba, **que proporcionarás tú** cuando se autorice |
+| El plugin de fusión no registra `Finance` sin editar `composer.json` | Se comprueba primero; si falla, **me detengo y te informo** |
+| Diferencias entre la API real de PayPal y la simulación | Las simulaciones siguen la documentación de Orders v2, Payments v2 y Webhooks; la prueba manual con *sandbox* queda pendiente (decisión 10) |
+| Cambios en el POS y las devoluciones afectan a la operación | Pruebas 14 y 16; el comportamiento de la caja (saldo por método) se ajusta en la Etapa 3 |
+| Bloqueos en concurrencia | Bloqueo por PK, transacciones cortas y reintentos; prueba 6 |
+| Llamadas de red dentro de transacciones | Ninguna: se confirma (*commit*) antes y después de cada llamada a PayPal |
 
 ---
 
-## O. Decisiones que necesito antes de implementar
+## 8. Confirmaciones pendientes (detalles que derivan de tus decisiones)
 
-| # | Decisión | Recomendación |
+| # | Punto | Propuesta del diseño |
 |---|---|---|
-| **D1** | ¿Migración nueva que elimina `pagos_externos` y crea las tablas nuevas, o editar `2026_11_20_000001`? | **Migración nueva** (aditiva; el repositorio ya se publicó con la anterior) |
-| **D2** | Tipo de cambio: ¿quién lo registra, cada cuánto vence, redondeo y si se aplica un recargo o margen? | Admin y encargado lo registran; vigencia hasta que se registre otro; HALF_UP a 2 decimales; sin recargo |
-| **D3** | Transferencia y QR: ¿se dan por recibidos al registrarlos el personal con su referencia, o quedan "pendientes de verificación" hasta confirmarlos en el banco? | Recibido al registrarlo un usuario con permiso, con referencia obligatoria y única |
-| **D4** | Reembolsos de PayPal: ¿ejecutarlos desde la aplicación (API) o solo registrar reembolsos hechos fuera? ¿Se permiten parciales? | Desde la aplicación, con el permiso `payments.refund`; parciales permitidos |
-| **D5** | Devoluciones de ventas: ¿generar un reembolso enlazado en lugar de modificar la nota en silencio? | Sí; la nota original no se modifica |
-| **D6** | Alquileres heredados (`maquinarias`): ¿se dejan sin cobros, porque los sustituirán las reservas por paquetes? | Dejarlos sin cambios en esta etapa |
-| **D7** | Expiración de un intento de pago en línea sin aprobar | 30 minutos (no bloquea stock ni equipos) |
-| **D8** | Ubicación: `Modules/Sales` o módulo nuevo `Finance` (requiere editar el autoload de `composer.json`, sin cambiar dependencias) | `Modules/Sales` ahora |
-| **D9** | Permisos nuevos (`payments.*`, `exchange.manage`) y a qué roles se asignan | Admin: todos; encargado: ver y conciliar; vendedor: registrar pagos presenciales |
-| **D10** | Credenciales *sandbox* de PayPal para una prueba manual final | Opcional; las pruebas automáticas no las necesitan |
+| **C1** | En el POS, con transferencia o QR, la venta (nota y descuento de stock) **solo se crea al verificar el pago**. Mientras tanto, el pago está `pendiente_verificacion` y no hay venta. | Aplicar así, por coherencia con "no registrar como recibido sin verificar" |
+| **C2** | Reembolsos: el encargado **solicita** y solo el administrador **autoriza y ejecuta** | Así (decisión 9: el encargado es operativo; el reembolso es financiero) |
+| **C3** | Reembolso de una venta cobrada en caja: se completa cuando el personal confirma que devolvió el dinero. Su efecto sobre el arqueo de caja se integra en la Etapa 3 | Así |
+| **C4** | Tasa = **BOB por 1 USD**; el pago usa la tasa de la fecha (La Paz) en que se **crea** el intento | Así |
+
+Cuando apruebes este diseño (y C1–C4), implementaré la Etapa 2 en este orden:
+1. Módulo Finance y su registro.
+2. Migraciones y modelos.
+3. Dinero, tipo de cambio y servicios.
+4. PayPal (orden, captura, conciliación, webhooks).
+5. Presencial y POS.
+6. Reembolsos y devoluciones.
+7. Permisos y vistas.
+8. Pruebas.
+
+Iré ejecutando las pruebas en cada paso.

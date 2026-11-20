@@ -11,6 +11,10 @@ use Modules\Audit\Models\Bitacora;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
+use Modules\Finance\Enums\EstadoPago;
+use Modules\Finance\Models\Pago;
+use Modules\Finance\Services\ReembolsoService;
+use Modules\Finance\Support\Dinero;
 
 class DevolucionController extends Controller
 {
@@ -123,95 +127,132 @@ class DevolucionController extends Controller
     }
 
     /**
-     * Aprobar una devolución (devuelve stock al inventario y reembolsa el total de la factura)
+     * Aprobar una devolución (Fase 2 — Etapa 2).
+     *
+     *  - NO modifica la nota de venta ni sus líneas: el historial original se conserva.
+     *  - Valida que lo devuelto acumulado no supere lo vendido por línea.
+     *  - Guarda el importe neto devuelto (con el descuento de la línea) en la devolución.
+     *  - Repone el stock.
+     *  - Si es una "Devolución" de una venta cobrada, crea un reembolso VINCULADO
+     *    (estado 'solicitado') que el administrador autoriza y ejecuta en Finanzas.
+     *    Una "Garantía" no genera reembolso.
      */
-    public function aprobar($id)
+    public function aprobar($id, ReembolsoService $reembolsos)
     {
-        DB::beginTransaction();
         try {
-            $devolucion = Devolucion::with('detalles')->findOrFail($id);
+            $resultado = DB::transaction(function () use ($id) {
+                $devolucion = Devolucion::with('detalles')->lockForUpdate()->findOrFail($id);
 
-            if ($devolucion->estado !== 'Pendiente') {
-                return back()->with('error', 'Esta devolución ya fue procesada.');
-            }
-
-            // Devolver stock
-            foreach ($devolucion->detalles as $detalle) {
-                $producto = Producto::where('idproducto', $detalle->idproducto)->lockForUpdate()->first();
-                if ($producto) {
-                    $producto->cantidad += $detalle->cantidad;
-                    $producto->save();
+                if ($devolucion->estado !== 'Pendiente') {
+                    throw new \DomainException('Esta devolución ya fue procesada.');
                 }
-            }
 
-            // Si es de tipo "Devolución", descontamos del total de la factura y actualizamos las cantidades en el detalle
-            if ($devolucion->tipo === 'Devolución') {
-                $factura = FacturaVenta::where('nro', $devolucion->nro_factura)->first();
-                if ($factura) {
-                    $totalDescuentoFactura = 0;
+                $lineas = DB::table('detalleNotaVenta')->where('nro_factura', $devolucion->nro_factura)->get()->keyBy('id_producto');
 
-                    foreach ($devolucion->detalles as $detalle) {
-                        // Buscar el detalle de la factura original
-                        $detalleFactura = DB::table('detalleNotaVenta')
-                            ->where('nro_factura', $devolucion->nro_factura)
-                            ->where('id_producto', $detalle->idproducto)
-                            ->first();
+                // Cantidades ya devueltas en devoluciones aprobadas de la misma nota
+                $previas = DevolucionDetalle::whereHas('devolucion', fn ($q) => $q
+                        ->where('nro_factura', $devolucion->nro_factura)
+                        ->where('estado', 'Aprobado'))
+                    ->get()
+                    ->groupBy('idproducto')
+                    ->map(fn ($g) => (int) $g->sum('cantidad'));
 
-                        if ($detalleFactura) {
-                            $cantidadOriginal = (int)$detalleFactura->cantidad;
-                            $cantidadDevuelta = (int)$detalle->cantidad;
+                $total = Dinero::cero('BOB');
 
-                            if ($cantidadOriginal > 0) {
-                                $precioUnitario = (float)$detalleFactura->precio_unitario;
-                                $descuentoOriginal = (float)$detalleFactura->descuento;
-                                
-                                // Precio neto unitario considerando el descuento original de la línea
-                                $precioNetoUnitario = ($precioUnitario * $cantidadOriginal - $descuentoOriginal) / $cantidadOriginal;
-                                
-                                $montoADescontar = $precioNetoUnitario * $cantidadDevuelta;
-                                $totalDescuentoFactura += $montoADescontar;
-
-                                $nuevaCantidad = max(0, $cantidadOriginal - $cantidadDevuelta);
-
-                                if ($nuevaCantidad <= 0) {
-                                    // Si no quedan unidades, eliminamos el registro del detalle de la nota de venta
-                                    DB::table('detalleNotaVenta')
-                                        ->where('nro_factura', $devolucion->nro_factura)
-                                        ->where('id_producto', $detalle->idproducto)
-                                        ->delete();
-                                } else {
-                                    // Si quedan unidades, actualizamos la cantidad y el descuento de forma proporcional
-                                    $nuevoDescuento = $descuentoOriginal - (($descuentoOriginal / $cantidadOriginal) * $cantidadDevuelta);
-                                    DB::table('detalleNotaVenta')
-                                        ->where('nro_factura', $devolucion->nro_factura)
-                                        ->where('id_producto', $detalle->idproducto)
-                                        ->update([
-                                            'cantidad' => $nuevaCantidad,
-                                            'descuento' => round($nuevoDescuento, 2)
-                                        ]);
-                                }
-                            }
-                        }
+                foreach ($devolucion->detalles as $detalle) {
+                    $linea = $lineas->get($detalle->idproducto);
+                    if (!$linea) {
+                        throw new \DomainException("El producto {$detalle->idproducto} no figura en la nota {$devolucion->nro_factura}.");
                     }
 
-                    // Actualizar el total de la factura
-                    $factura->total = max(0, $factura->total - $totalDescuentoFactura);
-                    $factura->save();
+                    $vendido = (int) $linea->cantidad;
+                    $acumulado = (int) ($previas[$detalle->idproducto] ?? 0) + (int) $detalle->cantidad;
+                    if ($acumulado > $vendido) {
+                        throw new \DomainException("Se intenta devolver {$acumulado} unidades del producto {$detalle->idproducto}, pero solo se vendieron {$vendido}.");
+                    }
+
+                    // Neto de la línea en centavos (precio × cantidad − descuento), prorrateado
+                    $netoLinea = Dinero::deDecimal((string) $linea->precio_unitario, 'BOB')->centavos * $vendido
+                        - Dinero::deDecimal((string) $linea->descuento, 'BOB')->centavos;
+                    $subtotalCent = intdiv($netoLinea * (int) $detalle->cantidad * 2 + $vendido, 2 * $vendido); // HALF_UP
+                    $unitarioCent = intdiv($netoLinea * 2 + $vendido, 2 * $vendido);
+
+                    $detalle->update([
+                        'precio_unitario' => Dinero::deCentavos($unitarioCent, 'BOB')->decimal(),
+                        'subtotal' => Dinero::deCentavos($subtotalCent, 'BOB')->decimal(),
+                    ]);
+
+                    $producto = Producto::where('idproducto', $detalle->idproducto)->lockForUpdate()->first();
+                    if ($producto) {
+                        $producto->cantidad += $detalle->cantidad;
+                        $producto->save();
+                    }
+
+                    $total = $total->sumar(Dinero::deCentavos($subtotalCent, 'BOB'));
                 }
-            }
 
-            $devolucion->estado = 'Aprobado';
-            $devolucion->save();
+                $devolucion->update([
+                    'estado' => 'Aprobado',
+                    'monto_total' => $devolucion->tipo === 'Devolución' ? $total->decimal() : '0.00',
+                    'ci_aprobado_por' => Auth::user()->ci,
+                    'aprobado_at' => now(),
+                ]);
 
-            Bitacora::registrar('ACTUALIZAR', 'devoluciones', $devolucion->id, "Devolución/Garantía Nro. {$devolucion->id} APROBADA. Stock y factura actualizados.");
+                Bitacora::registrar('ACTUALIZAR', 'devoluciones', $devolucion->id, "{$devolucion->tipo} Nro. {$devolucion->id} APROBADA por {$total->decimal()} BOB. Stock repuesto; la nota {$devolucion->nro_factura} no se modifica.");
 
-            DB::commit();
-
-            return back()->with('success', 'Devolución aprobada. El stock y el total de la factura se actualizaron con éxito.');
-        } catch (\Exception $e) {
-            DB::rollBack();
-            return back()->with('error', 'Error al aprobar: ' . $e->getMessage());
+                return ['devolucion' => $devolucion, 'total' => $total];
+            });
+        } catch (\DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        } catch (\Throwable $e) {
+            return back()->with('error', 'Error al aprobar la devolución.');
         }
+
+        $devolucion = $resultado['devolucion'];
+        $mensaje = 'Devolución aprobada. El stock se repuso; la nota de venta original se conserva sin cambios.';
+
+        if ($devolucion->tipo === 'Devolución' && $resultado['total']->esPositivo()) {
+            $mensaje .= ' ' . $this->solicitarReembolso($devolucion, $resultado['total'], $reembolsos);
+        }
+
+        return back()->with('success', $mensaje);
+    }
+
+    /**
+     * Crea el/los reembolso(s) vinculados a la devolución sobre los pagos recibidos de la venta.
+     */
+    private function solicitarReembolso(Devolucion $devolucion, Dinero $total, ReembolsoService $reembolsos): string
+    {
+        $pagos = Pago::where('nro_factura', $devolucion->nro_factura)
+            ->whereIn('estado', [EstadoPago::Recibido->value, EstadoPago::ReembolsadoParcial->value])
+            ->orderBy('id')->get();
+
+        if ($pagos->isEmpty()) {
+            Bitacora::registrar('REEMBOLSO_SIN_PAGO', 'devoluciones', $devolucion->id, "La nota {$devolucion->nro_factura} no tiene pagos registrados en Finanzas; el reembolso de {$total->decimal()} BOB debe gestionarse manualmente.");
+            return "La venta no tiene un pago registrado en Finanzas: gestione el reembolso de {$total->decimal()} BOB manualmente.";
+        }
+
+        $pendiente = $total;
+        try {
+            foreach ($pagos as $pago) {
+                if (!$pendiente->esPositivo()) {
+                    break;
+                }
+                $disponible = $reembolsos->disponible($pago);
+                if (!$disponible->esPositivo()) {
+                    continue;
+                }
+                $monto = $pendiente->mayorQue($disponible) ? $disponible : $pendiente;
+                $reembolsos->solicitar($pago, $monto, "Devolución Nro. {$devolucion->id}: {$devolucion->motivo}", Auth::user(), "devolucion-{$devolucion->id}-{$pago->id}", $devolucion->id);
+                $pendiente = $pendiente->restar($monto);
+            }
+        } catch (\DomainException $e) {
+            return 'No se pudo crear el reembolso: ' . $e->getMessage();
+        }
+
+        return $pendiente->esPositivo()
+            ? "Se solicitó un reembolso parcial; quedan {$pendiente->decimal()} BOB sin cubrir por pagos registrados."
+            : "Se solicitó el reembolso de {$total->decimal()} BOB; debe autorizarlo un administrador en Finanzas.";
     }
 
     /**

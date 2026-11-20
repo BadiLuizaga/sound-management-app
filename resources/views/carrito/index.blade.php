@@ -102,17 +102,16 @@
                         <span class="cart-total" style="color: var(--primary);">{{ number_format($totalConDescuento, 2) }} Bs.</span>
                     </div>
 
-                    <!-- Formulario oculto que se enviará cuando PayPal apruebe el pago -->
-                    <form id="form-checkout-backend" action="{{ route('carrito.checkout') }}" method="POST" style="display: none;">
-                        @csrf
-                        {{-- El servidor verifica esta orden directamente con PayPal antes de registrar la venta --}}
-                        <input type="hidden" name="paypal_order_id" id="paypal-order-id" value="">
-                    </form>
-
-                    <!-- Contenedor del Botón de PayPal -->
+                    <!-- Pago en línea (módulo Finance): orden y captura en el servidor -->
                     @auth
-                        @if(config('services.paypal.client_id') && ($pagoEnLineaDisponible ?? false))
+                        @if(($pagoEnLineaDisponible ?? false) && !empty($pagoEnLinea))
+                            <div style="margin-top: 10px; padding: 12px; border-radius: 10px; background: #F0FDFA; color: #134E4A; font-size: 0.9rem;">
+                                Total <strong>Bs. {{ $pagoEnLinea['monto_bob'] }}</strong> → se cobrará
+                                <strong>{{ $pagoEnLinea['moneda_proveedor'] }} {{ $pagoEnLinea['monto_proveedor'] }}</strong>
+                                (tipo de cambio {{ $pagoEnLinea['tasa'] }} Bs. por 1 {{ $pagoEnLinea['moneda_proveedor'] }} del {{ $pagoEnLinea['fecha_tasa'] }}).
+                            </div>
                             <div id="paypal-button-container" style="width: 100%; margin-top: 15px;"></div>
+                            <p id="pago-mensaje" style="margin-top: 10px; text-align: center; font-weight: 600; display: none;"></p>
                         @else
                             <p style="margin-top: 15px; text-align: center; color: var(--text-muted); font-weight: 600;">El pago en línea no está disponible por el momento.</p>
                         @endif
@@ -163,40 +162,58 @@
 
 @push('scripts')
     @auth
-        @if(count($cartItems) > 0 && config('services.paypal.client_id') && ($pagoEnLineaDisponible ?? false))
-        {{-- Client ID y moneda desde config/services.php (PAYPAL_CLIENT_ID, PAYPAL_CURRENCY) --}}
-        <script src="https://www.paypal.com/sdk/js?client-id={{ urlencode(config('services.paypal.client_id')) }}&currency={{ urlencode(config('services.paypal.currency', 'USD')) }}"></script>
+        @if(count($cartItems) > 0 && ($pagoEnLineaDisponible ?? false) && !empty($pagoEnLinea))
+        {{-- SDK con la moneda de cobro del proveedor; el importe lo fija el SERVIDOR al crear la orden --}}
+        <script src="https://www.paypal.com/sdk/js?client-id={{ urlencode(config('services.paypal.client_id')) }}&currency={{ urlencode($pagoEnLinea['moneda_proveedor']) }}&intent=capture"></script>
         <script>
-            paypal.Buttons({
-                createOrder: function(data, actions) {
-                    // Aquí se configura el monto a cobrar.
-                    // Nota: PayPal no soporta Bolivianos (BOB) nativamente, 
-                    // si necesitas usar BOB, asegúrate de convertir el total a USD aquí.
-                    return actions.order.create({
-                        purchase_units: [{
-                            amount: {
-                                value: '{{ number_format($totalConDescuento, 2, '.', '') }}' // Formato numérico de javascript sin comas
-                            }
-                        }]
-                    });
-                },
-                onApprove: function(data, actions) {
-                    // Se captura el dinero una vez aprobado por el cliente
-                    return actions.order.capture().then(function(details) {
-                        // Se envía solo el ID de la orden: el backend la verifica con PayPal
-                        // (estado, moneda y monto) antes de descontar inventario y vaciar el carrito.
-                        document.getElementById('paypal-order-id').value = data.orderID;
-                        document.getElementById('form-checkout-backend').submit();
-                    });
-                },
-                onCancel: function(data) {
-                    console.log('El pago fue cancelado por el usuario.');
-                },
-                onError: function(err) {
-                    console.error('Ocurrió un error en el flujo de PayPal:', err);
-                    alert('Ocurrió un problema al procesar el pago con PayPal.');
+            (function () {
+                const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '{{ csrf_token() }}';
+                // Una clave por carga de página: si se reintenta, el servidor devuelve el mismo intento de pago
+                const clave = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(16).slice(2) + '-pago');
+                let uuidPago = null;
+                const mensaje = document.getElementById('pago-mensaje');
+
+                function mostrar(texto, error) {
+                    mensaje.textContent = texto;
+                    mensaje.style.display = 'block';
+                    mensaje.style.color = error ? '#B91C1C' : '#065F46';
                 }
-            }).render('#paypal-button-container');
+
+                async function post(url, cuerpo) {
+                    const r = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-TOKEN': csrf },
+                        body: JSON.stringify(cuerpo || {})
+                    });
+                    const datos = await r.json().catch(() => ({}));
+                    if (!r.ok) { throw new Error(datos.message || 'No se pudo procesar el pago.'); }
+                    return datos;
+                }
+
+                paypal.Buttons({
+                    // El servidor calcula el importe, congela la tasa y crea la orden
+                    createOrder: async function () {
+                        const datos = await post(@json(route('finanzas.paypal.orden')), { clave_idempotencia: clave });
+                        uuidPago = datos.uuid;
+                        return datos.order_id;
+                    },
+                    // El servidor captura y verifica; el navegador solo muestra el resultado
+                    onApprove: async function () {
+                        mostrar('Confirmando tu pago con PayPal, no cierres esta página…', false);
+                        try {
+                            const datos = await post(@json(url('/pagos')) + '/' + encodeURIComponent(uuidPago) + '/captura');
+                            window.location.href = datos.resultado_url;
+                        } catch (e) {
+                            mostrar(e.message + ' Si PayPal te cobró, el pago está registrado y se confirmará automáticamente.', true);
+                        }
+                    },
+                    onCancel: function () { mostrar('Pago cancelado. No se realizó ningún cobro.', true); },
+                    onError: function (err) {
+                        console.error('Error en el flujo de PayPal', err);
+                        mostrar(err && err.message ? err.message : 'Ocurrió un problema con PayPal. No se realizó ningún cobro.', true);
+                    }
+                }).render('#paypal-button-container');
+            })();
         </script>
         @endif
     @endauth

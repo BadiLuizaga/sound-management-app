@@ -18,7 +18,27 @@ class Devolucion extends Model
         'estado',
         'ci_empleado',
         'observaciones',
+        // Fase 2 — Etapa 2: importes de la devolución (la nota de venta no se modifica)
+        'monto_total',
+        'ci_aprobado_por',
+        'aprobado_at',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'monto_total' => 'decimal:2',
+            'aprobado_at' => 'datetime',
+        ];
+    }
+
+    /**
+     * Reembolsos vinculados a esta devolución (módulo Finance)
+     */
+    public function reembolsos()
+    {
+        return $this->hasMany(\Modules\Finance\Models\Reembolso::class, 'devolucion_id');
+    }
 
     /**
      * Relación con la factura de venta

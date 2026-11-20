@@ -32,6 +32,8 @@ class EsquemaInstalacionTest extends TestCase
         'paquetes', 'paquete_items', 'reservas', 'reserva_paquetes', 'reserva_equipos',
         // Permisos
         'permisos', 'rol_permiso',
+        // Finanzas (Etapa 2, módulo Finance)
+        'tipos_cambio', 'tipo_cambio_revisiones', 'pagos', 'pago_eventos', 'reembolsos', 'webhook_eventos',
     ];
 
     public function test_todas_las_tablas_existen(): void
@@ -39,7 +41,7 @@ class EsquemaInstalacionTest extends TestCase
         $faltan = array_values(array_filter(self::TABLAS, fn ($t) => !Schema::hasTable($t)));
 
         $this->assertSame([], $faltan, 'Tablas que no se crearon: ' . implode(', ', $faltan));
-        $this->assertCount(49, self::TABLAS);
+        $this->assertCount(55, self::TABLAS);
     }
 
     public function test_tablas_que_antes_solo_estaban_en_sql_externo_tienen_sus_claves(): void
