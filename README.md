@@ -26,7 +26,7 @@
 
 ##  Descripción
 
-Sound Management administra el negocio de alquiler de equipos de sonido: inventario de equipos, reservas y alquileres, ventas, compras a proveedores, roles y permisos del personal, auditoría y un portal donde cada cliente se registra y consulta su información.
+Sound Management administra el negocio de alquiler de equipos de sonido: inventario de equipos, reservas y alquileres, ventas, roles y permisos del personal, auditoría y un portal donde cada cliente se registra y consulta su información.
 
 ---
 
