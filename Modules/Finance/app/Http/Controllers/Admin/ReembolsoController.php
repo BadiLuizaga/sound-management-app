@@ -85,9 +85,10 @@ class ReembolsoController extends Controller
     public function confirmarEntrega(Request $request, Reembolso $reembolso, ReembolsoService $reembolsos)
     {
         Gate::authorize('finance.refunds.request');
+        $request->validate(['medio_devolucion' => ['nullable', 'in:' . implode(',', Reembolso::MEDIOS_PRESENCIALES)]]);
 
         try {
-            $reembolsos->confirmarEntrega($reembolso, $request->user());
+            $reembolsos->confirmarEntrega($reembolso, $request->user(), $request->input('medio_devolucion'));
         } catch (TransicionInvalida|\DomainException $e) {
             return back()->with('error', $e->getMessage());
         }

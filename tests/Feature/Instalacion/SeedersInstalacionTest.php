@@ -24,6 +24,7 @@ class SeedersInstalacionTest extends TestCase
         'carritos', 'cajas', 'pagos_externos', 'bitacoras', 'bitacora',
         'paquetes', 'paquete_items', 'reservas', 'reserva_paquetes', 'reserva_equipos',
         'tipos_cambio', 'tipo_cambio_revisiones', 'pagos', 'pago_eventos', 'reembolsos', 'webhook_eventos',
+        'movimientos_caja', 'caja_eventos',
     ];
 
     public function test_metodos_de_pago_por_codigo(): void

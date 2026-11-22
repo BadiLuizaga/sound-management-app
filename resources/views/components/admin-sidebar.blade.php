@@ -65,6 +65,14 @@
         </a>
         @endcan
 
+        @can('cash.operate_own')
+        <!-- Caja (Etapa 3): administrador, encargado y vendedor -->
+        <a href="{{ route('caja.index') }}" class="nav-link {{ request()->routeIs('caja.*') ? 'active' : '' }}">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2" ry="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line></svg>
+            Caja
+        </a>
+        @endcan
+
         @can('rentals.view')
         <!-- Alquileres -->
         <a href="{{ route('alquileres.index') }}" class="nav-link {{ request()->routeIs('alquileres.*') ? 'active' : '' }}">
@@ -133,11 +141,7 @@
             Bitácora
         </a>
 
-        <!-- Caja -->
-        <a href="{{ route('caja.index') }}" class="nav-link {{ request()->routeIs('caja.*') ? 'active' : '' }}">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2" ry="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line></svg>
-            Caja
-        </a>
+        {{-- Caja: movida fuera del bloque admin (Etapa 3), ver @can('cash.operate_own') arriba --}}
 
         <!-- Devoluciones y Garantías (CU16) -->
         <a href="{{ route('admin.devoluciones.index') }}" class="nav-link {{ request()->routeIs('admin.devoluciones.*') ? 'active' : '' }}">
@@ -173,6 +177,13 @@
             Pagos
         </a>
         @endcanany
+
+        @can('finance.reports.view')
+        <a href="{{ route('finanzas.admin.reportes.index') }}" class="nav-link {{ request()->routeIs('finanzas.admin.reportes.*') ? 'active' : '' }}">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+            Reportes financieros
+        </a>
+        @endcan
 
         @can('finance.exchange.manage')
         <a href="{{ route('finanzas.admin.tipos-cambio.index') }}" class="nav-link {{ request()->routeIs('finanzas.admin.tipos-cambio.*') ? 'active' : '' }}">

@@ -68,6 +68,15 @@ return [
         'finance.refunds.execute'    => ['admin'],                            // autorizar y ejecutar reembolsos
         'finance.exchange.manage'    => ['admin'],                            // tipos de cambio
         'finance.audit.view'         => ['admin'],                            // historial, webhooks
+
+        // Caja (Fase 2 — Etapa 3). Técnico, almacenero y cliente: ninguno por defecto.
+        'cash.operate_own'      => ['admin', 'encargado', 'vendedor'],   // abrir, cerrar y ver la caja propia
+        'cash.view_all'         => ['admin', 'encargado'],
+        'cash.close_any'        => ['admin', 'encargado'],               // D2: cierre supervisado
+        'cash.movements.income' => ['admin', 'encargado', 'vendedor'],   // D3: ingresos (p. ej., cambio)
+        'cash.movements.expense'=> ['admin', 'encargado'],               // D3: egresos y correcciones
+        'cash.movements.revert' => ['admin'],                            // reversión correctiva
+        'finance.reports.view'  => ['admin', 'encargado'],               // reportes y conciliación
     ],
 
 ];

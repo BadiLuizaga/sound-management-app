@@ -180,7 +180,7 @@ The database tables are:
 9. `NotaCompra` (nro INT, fecha DATETIME, total DECIMAL, ci_proveedor INT, id_pago INT)
 10. `detalleNotaCompra` (nro_factura INT, id_producto INT, precio_unitario DECIMAL, cantidad INT)
 11. `bitacoras` (id INT, usuario VARCHAR, accion VARCHAR, tabla VARCHAR, registro_id INT, descripcion TEXT, ip VARCHAR, created_at TIMESTAMP)
-12. `cajas` (id INT, user_id INT, monto_apertura DECIMAL, monto_cierre DECIMAL, diferencia DECIMAL, estado VARCHAR, fecha_apertura DATETIME, fecha_cierre DATETIME)
+12. `cajas` (id INT, user_id INT, monto_apertura DECIMAL, monto_cierre DECIMAL, diferencia DECIMAL, estado VARCHAR, fecha_apertura DATETIME, fecha_cierre DATETIME, version_arqueo INT [1 = arqueo heredado sin desglose, 2 = arqueo por método], efectivo_esperado DECIMAL, efectivo_contado DECIMAL, ci_cerrado_por INT, cierre_supervisado BOOLEAN)
 13. `alquileres` (id INT, ci_cliente INT, ci_empleado INT, fecha_inicio DATETIME, fecha_fin_estimada DATETIME, fecha_devolucion DATETIME, total_estimado DECIMAL, total_real DECIMAL, estado VARCHAR)
 14. `devoluciones` (id INT, nro_factura INT, tipo VARCHAR, motivo TEXT, fecha DATE, estado VARCHAR, ci_empleado INT, observaciones TEXT)
 15. `devolucion_detalles` (id INT, devolucion_id INT, idproducto INT, cantidad INT)

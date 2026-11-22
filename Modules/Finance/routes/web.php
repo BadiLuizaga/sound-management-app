@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use Modules\Finance\Http\Controllers\Admin\PagoController;
 use Modules\Finance\Http\Controllers\Admin\ReembolsoController;
+use Modules\Finance\Http\Controllers\Admin\ReporteFinancieroController;
 use Modules\Finance\Http\Controllers\Admin\TipoCambioController;
 use Modules\Finance\Http\Controllers\PagoEnLineaController;
 use Modules\Finance\Http\Controllers\PayPalWebhookController;
@@ -47,6 +48,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
             ->middleware('can:finance.refunds.execute')->name('reembolsos.rechazar');
         Route::post('/reembolsos/{reembolso}/confirmar-entrega', [ReembolsoController::class, 'confirmarEntrega'])
             ->middleware('can:finance.refunds.request')->name('reembolsos.confirmar-entrega');
+
+        // Reportes y conciliación (Etapa 3, D8: pantalla y CSV)
+        Route::middleware(['can:finance.reports.view', 'throttle:60,1'])->group(function () {
+            Route::get('/reportes', [ReporteFinancieroController::class, 'index'])->name('reportes.index');
+            Route::get('/reportes/csv', [ReporteFinancieroController::class, 'csv'])->name('reportes.csv');
+        });
 
         Route::middleware('can:finance.exchange.manage')->group(function () {
             Route::get('/tipos-cambio', [TipoCambioController::class, 'index'])->name('tipos-cambio.index');

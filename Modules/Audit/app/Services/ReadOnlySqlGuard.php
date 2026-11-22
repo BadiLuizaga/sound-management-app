@@ -42,6 +42,8 @@ class ReadOnlySqlGuard
         '/\b(sessions|users|password_reset_tokens|cache|cache_locks|jobs|job_batches|failed_jobs|migrations|pagos_externos|carritos)\b/i',
         // Finanzas (Etapa 2): contienen respuestas del proveedor y datos de pagadores
         '/\b(pagos|pago_eventos|reembolsos|webhook_eventos)\b/i',
+        // Caja (Etapa 3): movimientos manuales e historial con responsables e IP
+        '/\b(movimientos_caja|caja_eventos)\b/i',
         '/@@|@[a-z_]/i',                     // variables de sistema o de usuario
     ];
 

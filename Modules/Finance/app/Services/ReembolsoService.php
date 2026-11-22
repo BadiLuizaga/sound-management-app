@@ -14,9 +14,12 @@ use Modules\Finance\Gateways\GatewayIncierto;
 use Modules\Finance\Gateways\GatewayRechazo;
 use Modules\Finance\Gateways\PaymentGateway;
 use Modules\Finance\Gateways\Resultados\ResultadoReembolso;
+use Modules\Finance\Models\CajaEvento;
 use Modules\Finance\Models\Pago;
 use Modules\Finance\Models\Reembolso;
 use Modules\Finance\Support\Dinero;
+use Modules\Sales\Models\Caja;
+use Modules\Sales\Models\MetodoPago;
 
 /**
  * Reembolsos totales y parciales.
@@ -32,7 +35,25 @@ class ReembolsoService
     public function __construct(
         private readonly PaymentGateway $gateway,
         private readonly PagoService $pagos,
+        private readonly CajaService $cajas,
+        private readonly ArqueoService $arqueo,
     ) {
+    }
+
+    /**
+     * Medio de devolución por defecto: el mismo método del cobro original.
+     */
+    public function medioPorDefecto(Pago $pago): string
+    {
+        $codigo = (string) MetodoPago::whereKey($pago->metodo_pago_id)->value('codigo');
+
+        return match ($codigo) {
+            MetodoPago::TARJETA => Reembolso::MEDIO_TARJETA,
+            MetodoPago::TRANSFERENCIA => Reembolso::MEDIO_TRANSFERENCIA,
+            MetodoPago::QR => Reembolso::MEDIO_QR,
+            MetodoPago::PAYPAL => Reembolso::MEDIO_PAYPAL,
+            default => Reembolso::MEDIO_EFECTIVO,
+        };
     }
 
     public function disponible(Pago $pago): Dinero
@@ -148,23 +169,58 @@ class ReembolsoService
 
     /**
      * Reembolso presencial: el personal confirma que devolvió el dinero.
+     *
+     * Etapa 3 (D7): en EFECTIVO el dinero sale de la caja abierta de quien lo
+     * entrega (obligatoria; se bloquea y queda asociada) y no puede superar el
+     * efectivo esperado de esa caja. Por tarjeta, transferencia o QR no resta
+     * efectivo; si quien entrega tiene caja abierta, se asocia a ella solo como
+     * referencia. Repetir la confirmación no vuelve a restar.
      */
-    public function confirmarEntrega(Reembolso $reembolso, Usuario $usuario): Reembolso
+    public function confirmarEntrega(Reembolso $reembolso, Usuario $usuario, ?string $medio = null): Reembolso
     {
-        return DB::transaction(function () use ($reembolso, $usuario) {
+        return DB::transaction(function () use ($reembolso, $usuario, $medio) {
             $r = Reembolso::whereKey($reembolso->id)->lockForUpdate()->firstOrFail();
             if ($r->pago->proveedor !== Pago::PROVEEDOR_MANUAL) {
                 throw new TransicionInvalida('Los reembolsos de PayPal se confirman con la respuesta del proveedor.');
             }
             if ($r->estado === EstadoReembolso::Completado) {
-                return $r;
+                return $r; // idempotente: no se resta dos veces
             }
             if ($r->estado !== EstadoReembolso::Autorizado) {
                 throw new TransicionInvalida('El reembolso debe estar autorizado.');
             }
 
-            $this->cambiarEstado($r, EstadoReembolso::Completado, ['completado_at' => now()], $usuario, ['entrega_confirmada_por' => $usuario->ci]);
+            $medio ??= $this->medioPorDefecto($r->pago);
+            if (!in_array($medio, Reembolso::MEDIOS_PRESENCIALES, true)) {
+                throw new \DomainException('Medio de devolución no válido para un reembolso presencial.');
+            }
+
+            $caja = Caja::where('user_id', $usuario->ci)->where('estado', Caja::ABIERTA)->lockForUpdate()->first();
+            if ($medio === Reembolso::MEDIO_EFECTIVO) {
+                if (!$caja) {
+                    throw new \DomainException('Para entregar un reembolso en efectivo debes tener tu caja abierta.');
+                }
+                $disponible = $this->arqueo->calcular($caja)->efectivoEsperado;
+                if ($r->importe()->mayorQue($disponible)) {
+                    throw new \DomainException("El reembolso supera el efectivo esperado en tu caja ({$disponible->decimal()} BOB).");
+                }
+            }
+
+            $this->cambiarEstado($r, EstadoReembolso::Completado, [
+                'completado_at' => now(),
+                'entregado_at' => now(),
+                'ci_entregado_por' => $usuario->ci,
+                'medio_devolucion' => $medio,
+                'caja_id' => $caja?->id,
+            ], $usuario, ['entrega_confirmada_por' => $usuario->ci, 'medio_devolucion' => $medio, 'caja' => $caja?->id]);
             $this->actualizarPago($r->pago, $usuario);
+
+            if ($caja) {
+                $this->cajas->evento($caja, CajaEvento::REEMBOLSO_ENTREGADO, $usuario, [
+                    'reembolso' => $r->uuid, 'monto' => (string) $r->monto, 'medio' => $medio,
+                    'resta_efectivo' => $medio === Reembolso::MEDIO_EFECTIVO,
+                ]);
+            }
 
             return $r;
         });

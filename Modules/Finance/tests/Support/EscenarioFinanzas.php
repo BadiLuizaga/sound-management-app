@@ -66,13 +66,16 @@ trait EscenarioFinanzas
         ]);
     }
 
+    /** Caja abierta del usuario (reutiliza la que ya tenga: una sola abierta por usuario). */
     protected function abrirCaja(Usuario $u, string $monto = '100.00'): Caja
     {
-        return Caja::create([
-            'user_id' => $u->ci,
-            'monto_apertura' => $monto,
-            'estado' => 'abierta',
-            'fecha_apertura' => now(),
-        ]);
+        return Caja::where('user_id', $u->ci)->where('estado', 'abierta')->first()
+            ?? Caja::create([
+                'user_id' => $u->ci,
+                'monto_apertura' => $monto,
+                'estado' => 'abierta',
+                'fecha_apertura' => now(),
+                'version_arqueo' => 2,
+            ]);
     }
 }

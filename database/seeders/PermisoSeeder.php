@@ -40,6 +40,13 @@ class PermisoSeeder extends Seeder
         'finance.refunds.execute' => 'Autorizar y ejecutar reembolsos.',
         'finance.exchange.manage' => 'Registrar y modificar tipos de cambio.',
         'finance.audit.view' => 'Ver el historial financiero y los webhooks.',
+        'cash.operate_own' => 'Abrir, cerrar y consultar la caja propia.',
+        'cash.view_all' => 'Ver todas las cajas y su historial.',
+        'cash.close_any' => 'Cerrar cajas de otros usuarios (cierre supervisado).',
+        'cash.movements.income' => 'Registrar ingresos de efectivo en la caja propia.',
+        'cash.movements.expense' => 'Registrar egresos de efectivo y correcciones de cajas cerradas.',
+        'cash.movements.revert' => 'Revertir movimientos de caja con un movimiento correctivo.',
+        'finance.reports.view' => 'Ver los reportes financieros y la conciliación.',
     ];
 
     public function run(): void

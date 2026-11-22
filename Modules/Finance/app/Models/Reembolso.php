@@ -16,6 +16,14 @@ class Reembolso extends Model
     public const ORIGEN_APLICACION = 'aplicacion';
     public const ORIGEN_EXTERNO = 'externo_webhook';
 
+    // Medio por el que se devolvió el dinero (Etapa 3). Solo "efectivo" resta del arqueo.
+    public const MEDIO_EFECTIVO = 'efectivo';
+    public const MEDIO_TARJETA = 'tarjeta';
+    public const MEDIO_TRANSFERENCIA = 'transferencia';
+    public const MEDIO_QR = 'qr';
+    public const MEDIO_PAYPAL = 'paypal';
+    public const MEDIOS_PRESENCIALES = [self::MEDIO_EFECTIVO, self::MEDIO_TARJETA, self::MEDIO_TRANSFERENCIA, self::MEDIO_QR];
+
     protected $table = 'reembolsos';
 
     protected $fillable = [
@@ -23,6 +31,7 @@ class Reembolso extends Model
         'monto', 'moneda', 'monto_proveedor', 'moneda_proveedor', 'tasa_aplicada',
         'referencia_externa', 'motivo', 'ci_solicitado_por', 'ci_autorizado_por',
         'respuesta_proveedor', 'solicitado_at', 'autorizado_at', 'completado_at',
+        'caja_id', 'medio_devolucion', 'ci_entregado_por', 'entregado_at',
     ];
 
     protected $hidden = ['respuesta_proveedor'];
@@ -38,7 +47,18 @@ class Reembolso extends Model
             'solicitado_at' => 'datetime',
             'autorizado_at' => 'datetime',
             'completado_at' => 'datetime',
+            'entregado_at' => 'datetime',
         ];
+    }
+
+    public function caja()
+    {
+        return $this->belongsTo(\Modules\Sales\Models\Caja::class, 'caja_id');
+    }
+
+    public function entregadoPor()
+    {
+        return $this->belongsTo(Usuario::class, 'ci_entregado_por', 'ci');
     }
 
     protected static function booted(): void

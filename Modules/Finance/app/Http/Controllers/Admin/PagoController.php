@@ -65,6 +65,7 @@ class PagoController extends Controller
         return view('finance::pagos.show', [
             'pago' => $pago->load(['metodoPago', 'registradoPor', 'verificadoPor', 'pagador', 'eventos', 'reembolsos', 'tipoCambio']),
             'disponible' => $reembolsos->disponible($pago),
+            'medioPorDefecto' => $reembolsos->medioPorDefecto($pago),
         ]);
     }
 

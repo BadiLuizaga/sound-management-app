@@ -3,8 +3,10 @@
 use Illuminate\Support\Facades\Route;
 use Modules\Sales\Http\Controllers\CartController;
 use Modules\Sales\Http\Controllers\VentaController;
-use Modules\Sales\Http\Controllers\CajaController;
 use Modules\Sales\Http\Controllers\PromocionController;
+// Etapa 3: la caja la gestiona el módulo Finance (el CajaController heredado de
+// Sales se conserva sin uso). Se mantienen los nombres de ruta caja.*.
+use Modules\Finance\Http\Controllers\Admin\CajaController;
 
 // ─────────────────────────────────────────────────────────
 // PÚBLICAS — accesibles sin login
@@ -54,12 +56,21 @@ Route::middleware(['auth', 'verified'])->group(function () {
     // Comprobante: personal de ventas o el propio cliente (control en el controlador).
     Route::get('/ventas/comprobante/{nro}', [VentaController::class, 'imprimir'])->name('ventas.comprobante');
 
-    Route::middleware('admin')->group(function () {
+    // Caja (Etapa 3): administrador, encargado y vendedor operan su propia caja.
+    // Ver o cerrar cajas ajenas y los movimientos se comprueban en el controlador
+    // con cash.view_all / cash.close_any / cash.movements.*.
+    Route::middleware('can:cash.operate_own')->group(function () {
         Route::get('/caja', [CajaController::class, 'index'])->name('caja.index');
-        Route::post('/caja/apertura', [CajaController::class, 'apertura'])->name('caja.apertura');
-        Route::post('/caja/corte/{caja}', [CajaController::class, 'corte'])->name('caja.corte');
-        Route::get('/caja/reporte/{caja}', [CajaController::class, 'reporte'])->name('caja.reporte');
+        Route::get('/caja/{caja}', [CajaController::class, 'show'])->whereNumber('caja')->name('caja.show');
+        Route::post('/caja/apertura', [CajaController::class, 'apertura'])->middleware('throttle:10,1')->name('caja.apertura');
+        Route::post('/caja/corte/{caja}', [CajaController::class, 'corte'])->whereNumber('caja')->middleware('throttle:20,1')->name('caja.corte');
+        Route::get('/caja/reporte/{caja}', [CajaController::class, 'reporte'])->whereNumber('caja')->name('caja.reporte');
+        Route::post('/caja/movimientos', [CajaController::class, 'movimiento'])->middleware('throttle:30,1')->name('caja.movimientos.store');
+        Route::post('/caja/movimientos/{movimiento}/revertir', [CajaController::class, 'revertir'])
+            ->middleware(['can:cash.movements.revert', 'throttle:20,1'])->name('caja.movimientos.revertir');
+    });
 
+    Route::middleware('admin')->group(function () {
         Route::get('/promociones', [PromocionController::class, 'index'])->name('admin.promociones.index');
         Route::get('/promociones/crear', [PromocionController::class, 'create'])->name('admin.promociones.create');
         Route::post('/promociones', [PromocionController::class, 'store'])->name('admin.promociones.store');

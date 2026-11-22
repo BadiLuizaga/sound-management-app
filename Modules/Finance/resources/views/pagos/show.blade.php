@@ -90,7 +90,15 @@
                         @endif
                         @if($r->estado->value === 'autorizado' && $pago->proveedor === 'manual')
                             @can('finance.refunds.request')
-                                <form method="POST" action="{{ route('finanzas.admin.reembolsos.confirmar-entrega', $r) }}">@csrf<button type="submit">Confirmar entrega del dinero</button></form>
+                                <form method="POST" action="{{ route('finanzas.admin.reembolsos.confirmar-entrega', $r) }}" style="display: flex; gap: 4px;">@csrf
+                                    {{-- Efectivo: sale de TU caja abierta (D7). Otros medios no restan efectivo. --}}
+                                    <select name="medio_devolucion">
+                                        @foreach(['efectivo' => 'Efectivo (de mi caja)', 'tarjeta' => 'Tarjeta (terminal)', 'transferencia' => 'Transferencia', 'qr' => 'QR'] as $valor => $texto)
+                                            <option value="{{ $valor }}" @selected($valor === $medioPorDefecto)>{{ $texto }}</option>
+                                        @endforeach
+                                    </select>
+                                    <button type="submit">Confirmar entrega del dinero</button>
+                                </form>
                             @endcan
                         @endif
                     </td>

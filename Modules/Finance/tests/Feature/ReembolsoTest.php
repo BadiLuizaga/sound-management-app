@@ -179,9 +179,13 @@ class ReembolsoTest extends TestCase
         $this->assertNull($r->monto_proveedor);
         $this->assertSame(0, $this->paypal->reembolsosSolicitados);
 
+        // Etapa 3 (D7): el efectivo sale de la caja abierta de quien lo entrega
+        $cajaAdmin = $this->abrirCaja($this->admin, '100.00');
         $r = $this->servicio()->confirmarEntrega($r, $this->admin);
         $this->assertSame(EstadoReembolso::Completado, $r->estado);
         $this->assertSame(EstadoPago::ReembolsadoParcial, $pago->fresh()->estado);
+        $this->assertSame('efectivo', $r->medio_devolucion);
+        $this->assertSame($cajaAdmin->id, $r->caja_id);
     }
 
     public function test_el_administrador_puede_rechazar_un_reembolso(): void
