@@ -10,6 +10,10 @@ class Producto extends Model
     use SoftDeletes;
     protected $table = 'producto';
     protected $primaryKey = 'idproducto';
+    // idproducto lo asigna la aplicación (no es AUTO_INCREMENT). Sin esto, en MySQL
+    // Eloquent reemplazaba la clave por lastInsertId() = 0 tras create().
+    public $incrementing = false;
+    protected $keyType = 'int';
     public $timestamps = false;
     // Esto permite que Laravel inserte datos en estos campos
     protected $fillable = ['idproducto', 'nombre', 'descripcion', 'imagen', 'modelo', 'precio', 'costo', 'cantidad', 'id_categoria', 'id_marca', 'fechacaducidad', 'id_color', 'id_medida', 'id_volumen'];
