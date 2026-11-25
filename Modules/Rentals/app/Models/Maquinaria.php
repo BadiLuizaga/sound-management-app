@@ -49,4 +49,12 @@ class Maquinaria extends Model
     {
         return $this->hasMany(ReservaEquipo::class, 'maquinaria_id');
     }
+
+    /**
+     * Unidades fuera de servicio (mantenimiento, daño, faltante) — Etapa 4
+     */
+    public function bloqueos()
+    {
+        return $this->hasMany(MaquinariaBloqueo::class, 'maquinaria_id');
+    }
 }

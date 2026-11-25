@@ -24,6 +24,12 @@ class MigracionCajasTest extends TestCase
 {
     private const PASOS_ETAPA_3 = 5;
 
+    /**
+     * Etapa 4 (paso 1): sus 8 migraciones se ejecutan después de las de la
+     * Etapa 3, así que se revierten primero para llegar a las de esta etapa.
+     */
+    private const PASOS_POSTERIORES = 8;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -50,7 +56,7 @@ class MigracionCajasTest extends TestCase
 
     private function revertirEtapa3(): void
     {
-        Artisan::call('migrate:rollback', ['--step' => self::PASOS_ETAPA_3]);
+        Artisan::call('migrate:rollback', ['--step' => self::PASOS_POSTERIORES + self::PASOS_ETAPA_3]);
         $this->assertFalse(Schema::hasTable('movimientos_caja'), 'La reversión debía quitar las tablas de la Etapa 3');
     }
 
