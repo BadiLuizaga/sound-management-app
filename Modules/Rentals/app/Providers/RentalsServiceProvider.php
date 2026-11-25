@@ -4,6 +4,7 @@ namespace Modules\Rentals\Providers;
 
 use Nwidart\Modules\Support\ModuleServiceProvider;
 use Illuminate\Console\Scheduling\Schedule;
+use Modules\Rentals\Console\ExpirarReservas;
 
 class RentalsServiceProvider extends ModuleServiceProvider
 {
@@ -22,7 +23,9 @@ class RentalsServiceProvider extends ModuleServiceProvider
      *
      * @var string[]
      */
-    // protected array $commands = [];
+    protected array $commands = [
+        ExpirarReservas::class, // Etapa 4 — paso 3
+    ];
 
     /**
      * Provider classes to register.
@@ -39,8 +42,9 @@ class RentalsServiceProvider extends ModuleServiceProvider
      * 
      * @param $schedule
      */
-    // protected function configureSchedules(Schedule $schedule): void
-    // {
-    //     $schedule->command('inspire')->hourly();
-    // }
+    protected function configureSchedules(Schedule $schedule): void
+    {
+        // Etapa 4 — paso 3: vence las reservas pendientes que no llegaron a confirmarse (D2)
+        $schedule->command('reservas:expirar')->everyMinute()->withoutOverlapping();
+    }
 }

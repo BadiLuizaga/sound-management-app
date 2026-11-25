@@ -13,6 +13,13 @@ class ReservaEvento extends Model
 {
     public const UPDATED_AT = null;
 
+    // Etapa 4 — paso 3
+    public const CREADA = 'creada';
+    public const CONFIRMADA = 'confirmada';
+    public const RECHAZADA = 'rechazada';
+    public const CANCELADA = 'cancelada';
+    public const EXPIRADA = 'expirada';
+
     protected $table = 'reserva_eventos';
 
     protected $fillable = ['reserva_id', 'tipo', 'estado_anterior', 'estado_nuevo', 'ci_responsable', 'datos', 'ip'];
