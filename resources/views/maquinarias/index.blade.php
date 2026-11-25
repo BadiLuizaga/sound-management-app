@@ -37,7 +37,6 @@
                         <th style="padding: 14px 16px;">Descripción</th>
                         <th style="padding: 14px 16px; text-align: right;">Tarifa Hora</th>
                         <th style="padding: 14px 16px; text-align: right;">Tarifa Día</th>
-                        <th style="padding: 14px 16px; text-align: right;">Garantía</th>
                         <th style="padding: 14px 16px; text-align: center;">Estado</th>
                         @can('admin')
                         <th style="padding: 14px 16px; text-align: center;">Acciones</th>
@@ -56,7 +55,6 @@
                             </td>
                             <td style="padding: 14px 16px; text-align: right; font-weight: 600;">{{ number_format($maq->precio_hora, 2) }} BOB</td>
                             <td style="padding: 14px 16px; text-align: right; font-weight: 600;">{{ number_format($maq->precio_dia, 2) }} BOB</td>
-                            <td style="padding: 14px 16px; text-align: right; font-weight: 600; color: #475569;">{{ number_format($maq->garantia_sugerida, 2) }} BOB</td>
                             <td style="padding: 14px 16px; text-align: center;">
                                 @if($maq->estado === 'disponible')
                                     <span style="background: #ecfdf5; color: #065f46; padding: 4px 10px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; border: 1px solid #a7f3d0;">Disponible</span>

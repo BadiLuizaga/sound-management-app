@@ -20,7 +20,7 @@
                     <select class="form-control" x-model="selectedMaquinariaId" @change="agregarMaquinariaSeleccionada()" style="width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #cbd5e1; outline: none; transition: border-color 0.2s;">
                         <option value="">-- Selecciona una máquina para añadir --</option>
                         @foreach($maquinarias as $maq)
-                            <option value="{{ $maq->id }}" data-nombre="{{ $maq->nombre }}" data-hora="{{ $maq->precio_hora }}" data-dia="{{ $maq->precio_dia }}" data-garantia="{{ $maq->garantia_sugerida }}">
+                            <option value="{{ $maq->id }}" data-nombre="{{ $maq->nombre }}" data-hora="{{ $maq->precio_hora }}" data-dia="{{ $maq->precio_dia }}">
                                 {{ $maq->codigo }} - {{ $maq->nombre }} (Hora: {{ number_format($maq->precio_hora, 2) }} / Día: {{ number_format($maq->precio_dia, 2) }} BOB)
                             </option>
                         @endforeach
@@ -47,7 +47,6 @@
                         <tr style="border-bottom: 1px solid #f1f5f9; font-size: 0.95rem; color: #334155;">
                             <td style="padding: 12px 8px;">
                                 <div style="font-weight: 600;" x-text="item.nombre"></div>
-                                <span style="font-size: 0.75rem; color: #94a3b8;" x-text="'Garantía sugerida: ' + item.garantia + ' BOB'"></span>
                             </td>
                             <td style="padding: 12px 8px; text-align: center;">
                                 <select x-model="item.tipo_tarifa" @change="actualizarPrecio(index)" style="padding: 6px; border: 1px solid #cbd5e1; border-radius: 6px; outline: none; font-size: 0.85rem; font-weight: 500; background: white;">
@@ -123,7 +122,7 @@
             </div>
         </div>
 
-        <!-- CONFIGURACIÓN DE ALQUILER Y GARANTÍA -->
+        <!-- CONFIGURACIÓN DEL ALQUILER (SOUND POS no gestiona garantías) -->
         <div style="background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); padding: 24px;">
             <h2 style="font-size: 1.25rem; font-weight: 700; color: #1e293b; margin-bottom: 20px;">Condiciones del Alquiler</h2>
 
@@ -136,18 +135,6 @@
             <div style="margin-bottom: 16px;">
                 <label style="display: block; font-size: 0.8rem; font-weight: 600; color: #64748b; margin-bottom: 6px;">Fecha y Hora Fin Estimada *</label>
                 <input type="datetime-local" x-model="fechaFinEstimada" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1; outline: none; font-weight: 500;">
-            </div>
-
-            <!-- Garantía -->
-            <div style="margin-bottom: 16px;">
-                <label style="display: block; font-size: 0.8rem; font-weight: 600; color: #64748b; margin-bottom: 6px;">Garantizado con (Documento/Artículo) *</label>
-                <input type="text" x-model="garantizadoCon" placeholder="Ej: CI Original del cliente, Licencia..." style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1; outline: none; font-weight: 500;">
-            </div>
-
-            <div style="margin-bottom: 16px;">
-                <label style="display: block; font-size: 0.8rem; font-weight: 600; color: #64748b; margin-bottom: 6px;">Monto Garantía Efectivo (BOB)</label>
-                <input type="number" step="0.01" x-model.number="montoGarantia" placeholder="0.00" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1; outline: none; font-weight: 500;">
-                <span style="font-size: 0.75rem; color: #64748b; display: block; margin-top: 4px;" x-text="'Monto sugerido acumulado: ' + calcularGarantiaSugerida() + ' BOB'"></span>
             </div>
 
             <!-- Método de Pago -->
@@ -256,8 +243,6 @@
             metodoPagoId: @json((string) ($metodosPago->first()->id ?? '')), // primer método activo, nunca un ID fijo
             fechaInicio: '',
             fechaFinEstimada: '',
-            garantizadoCon: '',
-            montoGarantia: 0,
             observaciones: '',
             carrito: [],
             cargandoCliente: false,
@@ -299,7 +284,6 @@
                 const nombre = selectedOption.getAttribute('data-nombre');
                 const p_hora = parseFloat(selectedOption.getAttribute('data-hora'));
                 const p_dia = parseFloat(selectedOption.getAttribute('data-dia'));
-                const garantia = parseFloat(selectedOption.getAttribute('data-garantia'));
 
                 // Verificar si ya existe en el carrito
                 const existente = this.carrito.find(item => item.id == id);
@@ -313,12 +297,8 @@
                         precio_dia: p_dia,
                         precio_unitario: p_dia, // Tarifa por defecto
                         tipo_tarifa: 'dia',
-                        tiempo_rentado: 1,
-                        garantia: garantia
+                        tiempo_rentado: 1
                     });
-                    
-                    // Actualizar garantía de entrada sugerida
-                    this.montoGarantia = this.calcularGarantiaSugerida();
                 }
 
                 this.selectedMaquinariaId = '';
@@ -354,7 +334,6 @@
 
             eliminarItem(index) {
                 this.carrito.splice(index, 1);
-                this.montoGarantia = this.calcularGarantiaSugerida();
             },
 
             calcularSubtotal(item) {
@@ -363,10 +342,6 @@
 
             calcularTotalGeneral() {
                 return this.carrito.reduce((sum, item) => sum + this.calcularSubtotal(item), 0);
-            },
-
-            calcularGarantiaSugerida() {
-                return this.carrito.reduce((sum, item) => sum + parseFloat(item.garantia), 0);
             },
 
             buscarClientePorCi() {
@@ -457,10 +432,6 @@
                     showToast('Debe agregar al menos una maquinaria para el alquiler.', 'error');
                     return;
                 }
-                if (!this.garantizadoCon) {
-                    showToast('Debes ingresar la garantía física (ej: CI original).', 'error');
-                    return;
-                }
 
                 this.procesandoAlquiler = true;
 
@@ -469,8 +440,6 @@
                     metodo_pago_id: this.metodoPagoId,
                     fecha_inicio: this.fechaInicio,
                     fecha_fin_estimada: this.fechaFinEstimada,
-                    garantizado_con: this.garantizadoCon,
-                    monto_garantia: this.montoGarantia,
                     observaciones: this.observaciones,
                     maquinarias: this.carrito.map(item => ({
                         id: item.id,

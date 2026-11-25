@@ -22,7 +22,6 @@ class Reembolso extends Model
     public const MEDIO_TRANSFERENCIA = 'transferencia';
     public const MEDIO_QR = 'qr';
     public const MEDIO_PAYPAL = 'paypal';
-    public const MEDIOS_PRESENCIALES = [self::MEDIO_EFECTIVO, self::MEDIO_TARJETA, self::MEDIO_TRANSFERENCIA, self::MEDIO_QR];
 
     protected $table = 'reembolsos';
 

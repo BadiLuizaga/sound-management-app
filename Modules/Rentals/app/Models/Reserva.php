@@ -14,7 +14,8 @@ use Modules\Access\Models\Usuario;
  *
  * Fase 2 — Etapa 1: solo estructura y relaciones.
  * Fase 2 — Etapa 4 (paso 1): canal, cargos, hitos del ciclo e idempotencia;
- * relaciones con eventos, entregas, garantías, incidencias y cargos. Sin lógica.
+ * relaciones con eventos, entregas, incidencias y cargos. Sin lógica.
+ * SOUND POS no gestiona garantías ni horas adicionales.
  */
 class Reserva extends Model
 {
@@ -108,11 +109,6 @@ class Reserva extends Model
     public function entregas()
     {
         return $this->hasMany(ReservaEntrega::class, 'reserva_id');
-    }
-
-    public function garantias()
-    {
-        return $this->hasMany(ReservaGarantia::class, 'reserva_id');
     }
 
     public function incidencias()

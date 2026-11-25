@@ -35,9 +35,7 @@ class PermisoSeeder extends Seeder
         'finance.payments.view_own' => 'Ver los pagos de caja registrados por uno mismo.',
         'finance.payments.register' => 'Registrar cobros presenciales en caja.',
         'finance.payments.verify' => 'Verificar o rechazar transferencias y pagos QR.',
-        'finance.payments.reconcile' => 'Conciliar pagos: reintentar o cerrar manualmente la aplicación.',
-        'finance.refunds.request' => 'Solicitar reembolsos y confirmar su entrega en caja.',
-        'finance.refunds.execute' => 'Autorizar y ejecutar reembolsos.',
+        'finance.payments.reconcile' => 'Revisar pagos recibidos sin aplicar: reintentar o cerrar manualmente la aplicación.',
         'finance.exchange.manage' => 'Registrar y modificar tipos de cambio.',
         'finance.audit.view' => 'Ver el historial financiero y los webhooks.',
         'cash.operate_own' => 'Abrir, cerrar y consultar la caja propia.',
@@ -46,7 +44,7 @@ class PermisoSeeder extends Seeder
         'cash.movements.income' => 'Registrar ingresos de efectivo en la caja propia.',
         'cash.movements.expense' => 'Registrar egresos de efectivo y correcciones de cajas cerradas.',
         'cash.movements.revert' => 'Revertir movimientos de caja con un movimiento correctivo.',
-        'finance.reports.view' => 'Ver los reportes financieros y la conciliación.',
+        'finance.reports.view' => 'Ver los reportes financieros.',
     ];
 
     public function run(): void

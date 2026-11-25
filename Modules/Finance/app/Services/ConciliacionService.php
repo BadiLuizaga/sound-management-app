@@ -38,7 +38,7 @@ class ConciliacionService
     {
         $resumen = [
             'expirados' => 0, 'recibidos' => 0, 'capturados' => 0, 'sin_cambios' => 0,
-            'errores_proveedor' => 0, 'reaplicados' => 0, 'reembolsos_resueltos' => 0,
+            'errores_proveedor' => 0, 'reaplicados' => 0, 'reembolsos_resueltos' => 0, 'reembolsos_sin_id' => 0,
             'webhooks_reprocesados' => 0, 'alertas_verificando' => 0,
         ];
 
@@ -151,31 +151,23 @@ class ConciliacionService
 
     private function resolverReembolsos(array &$resumen): void
     {
-        $abiertos = Reembolso::whereIn('estado', [EstadoReembolso::Procesando->value, EstadoReembolso::Incierto->value])
+        $abiertos = Reembolso::with('pago')->whereIn('estado', [EstadoReembolso::Procesando->value, EstadoReembolso::Incierto->value])
             ->whereHas('pago', fn ($q) => $q->where('proveedor', Pago::PROVEEDOR_PAYPAL))
             ->orderBy('id')->get();
 
         foreach ($abiertos as $r) {
+            // Solo se CONSULTA el estado de un reembolso del historial que ya tiene
+            // id de PayPal. La aplicación ya no inicia reembolsos: uno sin id se deja
+            // como está (lo resolverá el webhook de PayPal si llega a procesarse).
             if ($r->referencia_externa === null) {
-                // Sin id de PayPal: se reintenta con la MISMA PayPal-Request-Id (idempotente)
-                try {
-                    $resultado = $this->gateway->reembolsarCaptura(
-                        (string) $r->pago->referencia_captura,
-                        \Modules\Finance\Support\Dinero::deDecimal((string) $r->monto_proveedor, (string) $r->moneda_proveedor),
-                        'reembolso-' . $r->uuid,
-                        $r->motivo,
-                    );
-                } catch (GatewayIncierto|GatewayRechazo $e) {
-                    $resumen['errores_proveedor']++;
-                    continue;
-                }
-            } else {
-                try {
-                    $resultado = $this->gateway->consultarReembolso($r->referencia_externa);
-                } catch (GatewayIncierto|GatewayRechazo $e) {
-                    $resumen['errores_proveedor']++;
-                    continue;
-                }
+                $resumen['reembolsos_sin_id']++;
+                continue;
+            }
+            try {
+                $resultado = $this->gateway->consultarReembolso($r->referencia_externa);
+            } catch (GatewayIncierto|GatewayRechazo $e) {
+                $resumen['errores_proveedor']++;
+                continue;
             }
 
             $this->reembolsos->aplicarResultado($r, $resultado);

@@ -4,9 +4,9 @@
 
 @section('content')
 <div class="card animate-fade-up" style="padding: 24px; margin-top: 20px;">
-    <h2 style="margin-bottom: 4px;">Reportes financieros y conciliación</h2>
+    <h2 style="margin-bottom: 4px;">Reportes financieros</h2>
     <p style="color: var(--text-muted); margin-bottom: 16px;">
-        Importes en BOB. Los reportes de conciliación muestran lo pendiente hoy, sin importar la fecha (salvo «venta sin pago», que usa el período).
+        Importes en BOB, filtrados por el período seleccionado.
     </p>
 
     @include('finance::partials.mensajes')

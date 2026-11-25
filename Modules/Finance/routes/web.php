@@ -2,7 +2,6 @@
 
 use Illuminate\Support\Facades\Route;
 use Modules\Finance\Http\Controllers\Admin\PagoController;
-use Modules\Finance\Http\Controllers\Admin\ReembolsoController;
 use Modules\Finance\Http\Controllers\Admin\ReporteFinancieroController;
 use Modules\Finance\Http\Controllers\Admin\TipoCambioController;
 use Modules\Finance\Http\Controllers\PagoEnLineaController;
@@ -40,16 +39,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::post('/pagos/{pago}/aplicar-manual', [PagoController::class, 'aplicarManual'])
             ->middleware('can:finance.payments.reconcile')->name('pagos.aplicar-manual');
 
-        Route::post('/pagos/{pago}/reembolsos', [ReembolsoController::class, 'solicitar'])
-            ->middleware(['can:finance.refunds.request', 'throttle:20,1'])->name('reembolsos.solicitar');
-        Route::post('/reembolsos/{reembolso}/autorizar', [ReembolsoController::class, 'autorizar'])
-            ->middleware(['can:finance.refunds.execute', 'throttle:20,1'])->name('reembolsos.autorizar');
-        Route::post('/reembolsos/{reembolso}/rechazar', [ReembolsoController::class, 'rechazar'])
-            ->middleware('can:finance.refunds.execute')->name('reembolsos.rechazar');
-        Route::post('/reembolsos/{reembolso}/confirmar-entrega', [ReembolsoController::class, 'confirmarEntrega'])
-            ->middleware('can:finance.refunds.request')->name('reembolsos.confirmar-entrega');
-
-        // Reportes y conciliación (Etapa 3, D8: pantalla y CSV)
+        // Reportes financieros (Etapa 3, D8: pantalla y CSV)
         Route::middleware(['can:finance.reports.view', 'throttle:60,1'])->group(function () {
             Route::get('/reportes', [ReporteFinancieroController::class, 'index'])->name('reportes.index');
             Route::get('/reportes/csv', [ReporteFinancieroController::class, 'csv'])->name('reportes.csv');

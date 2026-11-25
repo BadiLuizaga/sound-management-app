@@ -11,9 +11,6 @@ use Modules\Audit\Models\Bitacora;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
-use Modules\Finance\Enums\EstadoPago;
-use Modules\Finance\Models\Pago;
-use Modules\Finance\Services\ReembolsoService;
 use Modules\Finance\Support\Dinero;
 
 class DevolucionController extends Controller
@@ -133,14 +130,14 @@ class DevolucionController extends Controller
      *  - Valida que lo devuelto acumulado no supere lo vendido por línea.
      *  - Guarda el importe neto devuelto (con el descuento de la línea) en la devolución.
      *  - Repone el stock.
-     *  - Si es una "Devolución" de una venta cobrada, crea un reembolso VINCULADO
-     *    (estado 'solicitado') que el administrador autoriza y ejecuta en Finanzas.
-     *    Una "Garantía" no genera reembolso.
+     *  - SOUND POS no devuelve dinero: ni una "Devolución" ni una "Garantía"
+     *    (reclamo por falla del producto) generan reembolso. El importe de la
+     *    devolución se guarda solo como referencia.
      */
-    public function aprobar($id, ReembolsoService $reembolsos)
+    public function aprobar($id)
     {
         try {
-            $resultado = DB::transaction(function () use ($id) {
+            DB::transaction(function () use ($id) {
                 $devolucion = Devolucion::with('detalles')->lockForUpdate()->findOrFail($id);
 
                 if ($devolucion->estado !== 'Pendiente') {
@@ -200,7 +197,6 @@ class DevolucionController extends Controller
 
                 Bitacora::registrar('ACTUALIZAR', 'devoluciones', $devolucion->id, "{$devolucion->tipo} Nro. {$devolucion->id} APROBADA por {$total->decimal()} BOB. Stock repuesto; la nota {$devolucion->nro_factura} no se modifica.");
 
-                return ['devolucion' => $devolucion, 'total' => $total];
             });
         } catch (\DomainException $e) {
             return back()->with('error', $e->getMessage());
@@ -208,51 +204,7 @@ class DevolucionController extends Controller
             return back()->with('error', 'Error al aprobar la devolución.');
         }
 
-        $devolucion = $resultado['devolucion'];
-        $mensaje = 'Devolución aprobada. El stock se repuso; la nota de venta original se conserva sin cambios.';
-
-        if ($devolucion->tipo === 'Devolución' && $resultado['total']->esPositivo()) {
-            $mensaje .= ' ' . $this->solicitarReembolso($devolucion, $resultado['total'], $reembolsos);
-        }
-
-        return back()->with('success', $mensaje);
-    }
-
-    /**
-     * Crea el/los reembolso(s) vinculados a la devolución sobre los pagos recibidos de la venta.
-     */
-    private function solicitarReembolso(Devolucion $devolucion, Dinero $total, ReembolsoService $reembolsos): string
-    {
-        $pagos = Pago::where('nro_factura', $devolucion->nro_factura)
-            ->whereIn('estado', [EstadoPago::Recibido->value, EstadoPago::ReembolsadoParcial->value])
-            ->orderBy('id')->get();
-
-        if ($pagos->isEmpty()) {
-            Bitacora::registrar('REEMBOLSO_SIN_PAGO', 'devoluciones', $devolucion->id, "La nota {$devolucion->nro_factura} no tiene pagos registrados en Finanzas; el reembolso de {$total->decimal()} BOB debe gestionarse manualmente.");
-            return "La venta no tiene un pago registrado en Finanzas: gestione el reembolso de {$total->decimal()} BOB manualmente.";
-        }
-
-        $pendiente = $total;
-        try {
-            foreach ($pagos as $pago) {
-                if (!$pendiente->esPositivo()) {
-                    break;
-                }
-                $disponible = $reembolsos->disponible($pago);
-                if (!$disponible->esPositivo()) {
-                    continue;
-                }
-                $monto = $pendiente->mayorQue($disponible) ? $disponible : $pendiente;
-                $reembolsos->solicitar($pago, $monto, "Devolución Nro. {$devolucion->id}: {$devolucion->motivo}", Auth::user(), "devolucion-{$devolucion->id}-{$pago->id}", $devolucion->id);
-                $pendiente = $pendiente->restar($monto);
-            }
-        } catch (\DomainException $e) {
-            return 'No se pudo crear el reembolso: ' . $e->getMessage();
-        }
-
-        return $pendiente->esPositivo()
-            ? "Se solicitó un reembolso parcial; quedan {$pendiente->decimal()} BOB sin cubrir por pagos registrados."
-            : "Se solicitó el reembolso de {$total->decimal()} BOB; debe autorizarlo un administrador en Finanzas.";
+        return back()->with('success', 'Devolución aprobada. El stock se repuso; la nota de venta original se conserva sin cambios. No se registra ninguna devolución de dinero.');
     }
 
     /**

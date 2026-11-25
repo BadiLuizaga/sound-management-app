@@ -4,11 +4,8 @@ namespace Modules\Finance\Tests\Feature;
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 use Modules\Finance\Models\CajaEvento;
-use Modules\Finance\Models\Pago;
 use Modules\Finance\Services\CajaService;
-use Modules\Finance\Services\ReembolsoService;
 use Modules\Finance\Support\Dinero;
 use Modules\Finance\Tests\Support\EscenarioFinanzas;
 use Modules\Finance\Tests\Support\PayPalFalso;
@@ -54,21 +51,18 @@ class AuditoriaCajaTest extends TestCase
             'efectivo_recibido' => '50',
             'clave_idempotencia' => 'pos-auditoria-000001',
         ])->assertOk();
-        $reembolsos = app(ReembolsoService::class);
-        $r = $reembolsos->solicitar(Pago::firstOrFail(), Dinero::deDecimal('10', 'BOB'), 'Defecto', $this->encargado, 'reemb-aud-00000001');
-        $reembolsos->confirmarEntrega($reembolsos->autorizarYEjecutar($r, $this->admin), $this->vendedor);
 
-        $this->cajas()->cerrar($caja, $this->encargado, Dinero::deDecimal('160', 'BOB'), 'Cierre por cambio de turno', 'cierre-aud-0000001');
+        $this->cajas()->cerrar($caja, $this->encargado, Dinero::deDecimal('170', 'BOB'), 'Cierre por cambio de turno', 'cierre-aud-0000001');
 
         $eventos = CajaEvento::where('caja_id', $caja->id)->orderBy('id')->get();
-        $this->assertSame(['apertura', 'ingreso', 'reembolso_entregado', 'cierre_supervisado'], $eventos->pluck('tipo')->all());
+        $this->assertSame(['apertura', 'ingreso', 'cierre_supervisado'], $eventos->pluck('tipo')->all());
         $this->assertSame([(int) $this->vendedor->ci], $eventos->pluck('ci_titular')->map(fn ($v) => (int) $v)->unique()->values()->all(), 'el titular es siempre el mismo');
         $this->assertSame(
-            [(int) $this->vendedor->ci, (int) $this->vendedor->ci, (int) $this->vendedor->ci, (int) $this->encargado->ci],
+            [(int) $this->vendedor->ci, (int) $this->vendedor->ci, (int) $this->encargado->ci],
             $eventos->pluck('ci_responsable')->map(fn ($v) => (int) $v)->all()
         );
-        $this->assertSame('160.00', $eventos->last()->datos['efectivo_contado']);
-        $this->assertSame('0.00', $eventos->last()->datos['diferencia'], '100 + 20 + 50 − 10');
+        $this->assertSame('170.00', $eventos->last()->datos['efectivo_contado']);
+        $this->assertSame('0.00', $eventos->last()->datos['diferencia'], '100 + 20 + 50');
 
         $this->actingAs($this->encargado)->get(route('caja.show', $caja))->assertOk()
             ->assertSee('cierre supervisado')

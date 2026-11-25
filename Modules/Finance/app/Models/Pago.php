@@ -25,10 +25,6 @@ class Pago extends Model
     public const PROVEEDOR_PAYPAL = 'paypal';
     public const PROVEEDOR_MANUAL = 'manual';
 
-    /** Etapa 4 (C2): la garantía es un depósito y no cuenta como cobro del alquiler */
-    public const CONCEPTO_ALQUILER = 'alquiler';
-    public const CONCEPTO_GARANTIA = 'garantia';
-
     protected $table = 'pagos';
 
     protected $fillable = [
@@ -37,7 +33,7 @@ class Pago extends Model
         'monto', 'moneda', 'monto_recibido_efectivo', 'cambio_entregado',
         'monto_proveedor', 'moneda_proveedor', 'tipo_cambio_id', 'tasa_aplicada',
         'referencia_externa', 'referencia_captura',
-        'ci_usuario', 'ci_registrado_por', 'ci_verificado_por', 'caja_id', 'nro_factura', 'reserva_id', 'concepto',
+        'ci_usuario', 'ci_registrado_por', 'ci_verificado_por', 'caja_id', 'nro_factura', 'reserva_id',
         'legacy_pago_externo_id', 'snapshot', 'respuesta_proveedor', 'motivo_revision', 'motivo_rechazo',
         'expira_at', 'recibido_at', 'verificado_at', 'aplicado_at',
     ];

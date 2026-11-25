@@ -2,7 +2,9 @@
 
 **Proyecto:** `E:\BadiStudio\sound-management-app`
 **Fecha:** 2026-11-25
-**Estado:** diagnóstico final, con las decisiones D1–D8 aprobadas y las cinco correcciones (C1–C5) incorporadas. **La implementación espera una autorización expresa.**
+**Estado:** diagnóstico final, con las decisiones D1–D8 aprobadas y las cinco correcciones (C1–C5) incorporadas. Pasos 1–3 implementados y aprobados.
+
+> **Actualización de alcance SOUND POS (2026-11-26):** se eliminaron las garantías, los reembolsos, las horas adicionales y retrasos, y los reportes de conciliación. **La §12 prevalece sobre el resto del documento** y redefine los pasos 4 a 9.
 
 > Para elaborar este diagnóstico no se modificó código, migraciones, bases de datos, dependencias ni configuración. No se ejecutaron pruebas ni operaciones Git. El único archivo creado es este documento.
 
@@ -338,12 +340,7 @@ El cliente accede solo a lo suyo, por propiedad (`ci_cliente`); no necesita perm
 | 1 | Las 8 migraciones y sus modelos | `MigracionReservasTest`: `rollback --step=8` y `migrate`; los pagos existentes quedan con `concepto = alquiler` sin cambiar importes; CHECK solo en MySQL; **42 hashes intactos y 50 migraciones** |
 | 2 | `DisponibilidadService` y `CotizadorReserva` | Límites `[a, b)`; **margen de 60 min antes y después** (los cuatro casos de §3.2); bloqueos; alquileres heredados; `cantidad_total > 1`; horas mínimas y máximas; sin tarifa por día |
 | 3 | `ReservaService`: crear, confirmar, rechazar, cancelar y vencer; eventos; tareas programadas | Confirmación sin ningún pago; un pago no crea `reserva_equipos`; la cancelación libera; idempotencia; **concurrencia real en MySQL (§10.2)** |
-| 4 | Finanzas: `concepto`, `AplicadorReserva`, pago en línea y presencial de la reserva | Anticipo → `parcial`; saldo → `pagado`; **la garantía no cambia `estado_pago`**; la garantía aparece **aparte** en el arqueo, la foto del cierre, el PDF y los reportes; regresión de las 144 pruebas de Finanzas |
-| 5 | Entrega, devolución, horas extra y cargos | Checklist; devolución tardía con conflicto (y margen); tolerancia de 15 min; total con cargos |
-| 6 | Garantías e incidencias | Devolución íntegra por el vendedor (D6) que resta como «Garantías devueltas»; retención solo por encargado o administrador; bloqueo por daño (D8); una doble confirmación no tiene doble efecto |
-| 7 | Canales: ERP, POS, portal y catálogo | Permisos por rol (botones y rutas); propiedad del cliente; alta heredada congelada (D1) |
-| 8 | Reportes y tickets | PDF y CSV; confirmadas sin pago (D3); atrasos; sección de garantías |
-| 9 | Validación final con `.tools\ejecutar-pruebas.ps1` (SQLite) y `.tools\validacion-mysql-etapa4.ps1` (MySQL en `sound_management_test:3310`) | Rentals, Finanzas e Instalación en los dos motores; nueva línea base de 50 migraciones; `composer.json` y `composer.lock` con el mismo hash; informe `INFORME_ETAPA_4_VALIDACION.md` |
+> **Pasos 4 a 9: sustituidos por §12.5**, por la actualización de alcance de SOUND POS (sin garantías, sin reembolsos, sin horas adicionales ni retrasos, sin reportes de conciliación). La versión anterior de esos pasos ya no rige.
 
 **Fuera de alcance:** las 21 pruebas Breeze heredadas que fallan (Etapa 5), mover los permisos a `rol_permiso` y la prueba manual con PayPal *sandbox*.
 
@@ -361,4 +358,77 @@ El cliente accede solo a lo suyo, por propiedad (`ci_cliente`); no necesita perm
 
 ---
 
-**Pendiente:** autorización expresa para comenzar la implementación de la Etapa 4, empezando por el paso 1.
+## 12. Actualización de alcance: SOUND POS (2026-11-26)
+
+Aprobada después del paso 3. **Prevalece sobre cualquier sección anterior de este documento.** Ninguna implementación futura debe volver a introducir lo eliminado.
+
+### 12.1 Funcionalidades eliminadas
+
+| Área | Eliminado | Se conserva |
+|---|---|---|
+| Reservas y alquileres | Control de retrasos y horas adicionales: cálculos, procesos automáticos y cobros. El alquiler heredado ya no recalcula el total por el tiempo real transcurrido | Reservas, cotizaciones, disponibilidad (con margen de 60 min), confirmaciones, cancelaciones, entregas y devoluciones normales. Una reserva vencida sin devolver sigue ocupando sus equipos hasta registrar la devolución (decisión del paso 2): es disponibilidad, no un cobro ni un control de retraso |
+| Finanzas | Gestión de garantías (depósitos). Gestión de reembolsos: solicitar, autorizar, ejecutar y entregar dinero, sin ninguna operación que devuelva dinero | Pagos, anticipos, saldos pendientes, ingresos, egresos y reportes. **Historial de reembolsos en solo lectura** y registro de los hechos **fuera** de la aplicación (webhook de PayPal) |
+| Caja | Reportes de conciliación (de pagos y de reembolsos) y el reporte de reembolsos entregados | Apertura y cierre, arqueos, movimientos de efectivo, supervisión y reportes. Las cajas antiguas conservan en su arqueo los reembolsos que ya tenían |
+| Devoluciones de productos | Reembolso automático al aprobar | Devolución y reclamo por garantía del producto: reponen stock; el importe queda como referencia |
+
+**Decisiones que se tomaron en esta actualización:**
+- **Reembolsos:** se elimina la operación y se conserva el historial. La tabla `reembolsos` se mantiene, en solo lectura, con su historial.
+- **Devoluciones de productos:** solo reponen stock.
+- **Conciliación:** se eliminan solo los reportes. La tarea `finanzas:conciliar` se conserva, porque protege los cobros de PayPal, y ahora solo *consulta* reembolsos del historial: nunca los ejecuta.
+- **Columnas de garantía** en tablas originales (`maquinarias.garantia_sugerida`, `alquileres.garantizado_con` y `alquileres.monto_garantia`): se conservan como historial y ya no se capturan.
+
+### 12.2 Decisiones y correcciones anuladas o modificadas
+
+| Antes | Ahora |
+|---|---|
+| C2 (garantías separadas en caja y reportes), §3.4 | **Anulada.** No hay garantías |
+| D5 (tolerancia de 15 min y cobro por hora iniciada) | **Anulada.** No hay horas adicionales |
+| D6 (devolución y retención de garantías) | **Anulada** |
+| D7 (cancelación sin penalidad y reembolso por su circuito) | **Modificada:** cancelar libera los equipos y no toca los pagos; no hay reembolsos |
+| D8 (daño: bloqueo de unidades y mantenimiento opcional) | Se mantiene |
+| D1–D4, C1, C3, C4 | Se mantienen |
+| `MarcarAtrasos` (comando previsto para el paso 5) | **Eliminado del plan** |
+
+### 12.3 Estructuras de base de datos
+
+| Estructura | Acción |
+|---|---|
+| `reserva_garantias` | Eliminada (nueva migración `2026_11_26_000001`) |
+| `reserva_cargos.horas` y concepto `horas_extra` | Eliminados (misma migración). Quedan los cargos por daño, faltante u otro |
+| `reserva_incidencias.tipo = retraso` | Eliminado (misma migración) |
+| `pagos.concepto` | Eliminada (nueva migración `2026_11_26_000002`) |
+| `reembolsos`, columnas de garantía heredadas | Se conservan como historial |
+
+Las migraciones existentes **no se modificaron**: las eliminaciones son migraciones nuevas, reversibles, que se detienen sin cambios si hay datos que se perderían.
+
+**Línea base:** 42 originales + 8 del paso 1 + 2 de esta actualización = **52 migraciones**. La línea base final (`huellas-migraciones-etapa4.txt`) se genera en el paso 9.
+
+### 12.4 Permisos
+
+- Eliminados: `finance.refunds.request` y `finance.refunds.execute`.
+- Los permisos del paso 7 ya no incluyen `rentals.deposits.return` ni `rentals.deposits.retain`.
+
+### 12.5 Pasos 4 a 9 (nuevo alcance)
+
+| Paso | Contenido | Pruebas principales (SQLite y MySQL) |
+|---|---|---|
+| 4 | Pagos de la reserva: anticipo y saldo en caja (`registrarPresencial`) y en línea (`iniciarEnLinea` con `reserva_id`); `AplicadorReserva` compara con `total + total_cargos` | Anticipo → `parcial`; saldo → `pagado`; pagar no confirma ni bloquea equipos; sin sobrepago; el cobro entra al arqueo por `caja_id`; regresión de Finanzas |
+| 5 | Entregas y devoluciones normales (`EntregaService`): checklist por equipo y unidades; la devolución libera `reserva_equipos` y registra `devuelta_at`; liquidación → `finalizada` | Entrega → `en_curso`; devolución total; devolución con daño o faltante que genera una incidencia; idempotencia. **Sin** horas extra, tolerancias ni atrasos |
+| 6 | Incidencias por daño, faltante u otro (`IncidenciaService`): bloqueo de unidades (D8), mantenimiento opcional y cargo por daño o faltante | El bloqueo descuenta la disponibilidad; levantar el bloqueo la restituye; el cargo suma a `total_cargos`; anular un cargo |
+| 7 | Canales: ERP, POS de mostrador, portal del cliente y catálogo de paquetes; alta heredada congelada (D1) | Permisos por rol (botones y rutas); propiedad del cliente; sin opciones de garantía ni de reembolso |
+| 8 | Reportes y tickets: ocupación, confirmadas sin pago (D3), saldos pendientes, incidencias abiertas; comprobantes de reserva, entrega y devolución | PDF y CSV; sin secciones de garantías, atrasos ni conciliación |
+| 9 | Validación final: `.tools\ejecutar-pruebas.ps1` (SQLite) y `.tools\validacion-mysql-etapa4.ps1` (MySQL en `sound_management_test:3310`) | Rentals, Finanzas, Procurement e Instalación en los dos motores; línea base de 52 migraciones; `composer.json` y `composer.lock` sin cambios; `INFORME_ETAPA_4_VALIDACION.md` |
+
+### 12.6 Regla permanente
+
+No se vuelven a introducir:
+- garantías ni depósitos;
+- reembolsos ni ninguna devolución de dinero;
+- horas adicionales, tolerancias, recargos por retraso ni control de atrasos;
+- reportes de conciliación.
+
+Cualquier cambio que lo requiera necesita una decisión expresa nueva.
+
+---
+
+**Pendiente:** autorización expresa para comenzar el paso 4 con este alcance.

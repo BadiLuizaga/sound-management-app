@@ -5,7 +5,6 @@ namespace Modules\Finance\Gateways;
 use Modules\Finance\Gateways\Resultados\ResultadoOrden;
 use Modules\Finance\Gateways\Resultados\ResultadoReembolso;
 use Modules\Finance\Models\Pago;
-use Modules\Finance\Support\Dinero;
 
 /**
  * Proveedor de pagos en línea.
@@ -30,9 +29,10 @@ interface PaymentGateway
     /** Consulta el estado real de una orden (y su captura, si existe). */
     public function consultarOrden(string $orderId): ResultadoOrden;
 
-    /** Reembolsa total o parcialmente una captura (idempotente por $requestId). */
-    public function reembolsarCaptura(string $captureId, Dinero $monto, string $requestId, string $nota): ResultadoReembolso;
-
+    /**
+     * Consulta el estado de un reembolso ya existente en PayPal (historial).
+     * SOUND POS no inicia reembolsos: no hay método para ejecutarlos.
+     */
     public function consultarReembolso(string $refundId): ResultadoReembolso;
 
     /**

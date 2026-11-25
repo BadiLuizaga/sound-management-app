@@ -6,14 +6,13 @@ use Illuminate\Database\Eloquent\Model;
 use Modules\Access\Models\Usuario;
 
 /**
- * Incidencia de una reserva: daño, faltante, retraso u otro.
- * Fase 2 — Etapa 4 (paso 1): solo estructura y relaciones.
+ * Incidencia de una reserva: daño, faltante u otro (SOUND POS no controla
+ * retrasos). Fase 2 — Etapa 4 (paso 1): solo estructura y relaciones.
  */
 class ReservaIncidencia extends Model
 {
     public const TIPO_DANO = 'dano';
     public const TIPO_FALTANTE = 'faltante';
-    public const TIPO_RETRASO = 'retraso';
     public const TIPO_OTRO = 'otro';
 
     public const ESTADO_ABIERTA = 'abierta';
@@ -70,11 +69,6 @@ class ReservaIncidencia extends Model
     public function cargos()
     {
         return $this->hasMany(ReservaCargo::class, 'incidencia_id');
-    }
-
-    public function garantias()
-    {
-        return $this->hasMany(ReservaGarantia::class, 'incidencia_id');
     }
 
     public function bloqueos()

@@ -25,10 +25,11 @@ class MigracionCajasTest extends TestCase
     private const PASOS_ETAPA_3 = 5;
 
     /**
-     * Etapa 4 (paso 1): sus 8 migraciones se ejecutan después de las de la
+     * Etapa 4: sus 10 migraciones (8 del paso 1 y 2 de la actualización de
+     * alcance) se ejecutan después de las de la
      * Etapa 3, así que se revierten primero para llegar a las de esta etapa.
      */
-    private const PASOS_POSTERIORES = 8;
+    private const PASOS_POSTERIORES = 10;
 
     protected function setUp(): void
     {

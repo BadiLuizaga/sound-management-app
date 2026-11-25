@@ -10,12 +10,12 @@ use Modules\Finance\Enums\EstadoPago;
 use Modules\Finance\Exceptions\TransicionInvalida;
 use Modules\Finance\Models\Pago;
 use Modules\Finance\Services\PagoService;
-use Modules\Finance\Services\ReembolsoService;
 use Modules\Sales\Models\MetodoPago;
 
 /**
  * Administración de pagos: listado, detalle, verificación de transferencias/QR
- * y conciliación. El vendedor solo ve los pagos de caja que registró él.
+ * y revisión de pagos recibidos sin aplicar. El vendedor solo ve los pagos de caja
+ * que registró él.
  */
 class PagoController extends Controller
 {
@@ -58,14 +58,12 @@ class PagoController extends Controller
         ]);
     }
 
-    public function show(Request $request, Pago $pago, ReembolsoService $reembolsos)
+    public function show(Request $request, Pago $pago)
     {
         $this->autorizarVer($request, $pago);
 
         return view('finance::pagos.show', [
             'pago' => $pago->load(['metodoPago', 'registradoPor', 'verificadoPor', 'pagador', 'eventos', 'reembolsos', 'tipoCambio']),
-            'disponible' => $reembolsos->disponible($pago),
-            'medioPorDefecto' => $reembolsos->medioPorDefecto($pago),
         ]);
     }
 

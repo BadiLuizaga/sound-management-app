@@ -9,7 +9,7 @@ use Modules\Finance\Services\ReporteFinancieroService;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
- * Reportes financieros y conciliación (D8: pantalla y CSV).
+ * Reportes financieros (D8: pantalla y CSV).
  * Permiso finance.reports.view (aplicado en las rutas).
  */
 class ReporteFinancieroController extends Controller

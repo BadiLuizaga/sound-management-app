@@ -10,52 +10,33 @@ use Modules\Finance\Aplicadores\AplicadorReserva;
 use Modules\Finance\Enums\EstadoPago;
 use Modules\Finance\Enums\EstadoReembolso;
 use Modules\Finance\Exceptions\TransicionInvalida;
-use Modules\Finance\Gateways\GatewayIncierto;
-use Modules\Finance\Gateways\GatewayRechazo;
-use Modules\Finance\Gateways\PaymentGateway;
 use Modules\Finance\Gateways\Resultados\ResultadoReembolso;
-use Modules\Finance\Models\CajaEvento;
 use Modules\Finance\Models\Pago;
 use Modules\Finance\Models\Reembolso;
 use Modules\Finance\Support\Dinero;
-use Modules\Sales\Models\Caja;
-use Modules\Sales\Models\MetodoPago;
 
 /**
- * Reembolsos totales y parciales.
- *  - Doble paso: el encargado SOLICITA; el administrador AUTORIZA y EJECUTA
- *    (el administrador puede hacer ambos).
- *  - Idempotentes (clave propia + PayPal-Request-Id = "reembolso-{uuid}").
- *  - Σ reembolsos (en curso + completados) ≤ importe recibido, comprobado con
- *    el pago bloqueado.
- *  - El importe en USD usa SIEMPRE la tasa original del pago.
+ * Registro de reembolsos (solo lectura e integridad con PayPal).
+ *
+ * SOUND POS no gestiona reembolsos: no se solicitan, autorizan, ejecutan ni
+ * entregan desde la aplicación, y no existe ninguna operación que devuelva
+ * dinero. Este servicio solo:
+ *  - registra los reembolsos que se hacen FUERA de la aplicación (panel de
+ *    PayPal, contracargos), notificados por webhook, para que el estado del
+ *    pago refleje el dinero realmente cobrado;
+ *  - aplica el resultado informado por PayPal a un reembolso ya existente en el
+ *    historial (webhook o consulta de la conciliación de PayPal);
+ *  - recalcula el estado del pago y, si es de una reserva, su estado de pago.
+ *
+ * Los reembolsos anteriores se conservan como historial y nunca se eliminan.
  */
 class ReembolsoService
 {
-    public function __construct(
-        private readonly PaymentGateway $gateway,
-        private readonly PagoService $pagos,
-        private readonly CajaService $cajas,
-        private readonly ArqueoService $arqueo,
-    ) {
-    }
-
-    /**
-     * Medio de devolución por defecto: el mismo método del cobro original.
-     */
-    public function medioPorDefecto(Pago $pago): string
+    public function __construct(private readonly PagoService $pagos)
     {
-        $codigo = (string) MetodoPago::whereKey($pago->metodo_pago_id)->value('codigo');
-
-        return match ($codigo) {
-            MetodoPago::TARJETA => Reembolso::MEDIO_TARJETA,
-            MetodoPago::TRANSFERENCIA => Reembolso::MEDIO_TRANSFERENCIA,
-            MetodoPago::QR => Reembolso::MEDIO_QR,
-            MetodoPago::PAYPAL => Reembolso::MEDIO_PAYPAL,
-            default => Reembolso::MEDIO_EFECTIVO,
-        };
     }
 
+    /** Importe del pago aún no cubierto por reembolsos en curso o completados. */
     public function disponible(Pago $pago): Dinero
     {
         $comprometido = Dinero::cero('BOB');
@@ -70,177 +51,9 @@ class ReembolsoService
         return $disponible->centavos > 0 ? $disponible : Dinero::cero('BOB');
     }
 
-    public function solicitar(Pago $pago, Dinero $monto, string $motivo, Usuario $solicitante, string $claveIdempotencia, ?int $devolucionId = null): Reembolso
-    {
-        if (trim($motivo) === '') {
-            throw new \DomainException('El motivo del reembolso es obligatorio.');
-        }
-        if ($monto->moneda !== 'BOB' || !$monto->esPositivo()) {
-            throw new \DomainException('El importe a reembolsar debe ser mayor que cero (BOB).');
-        }
-
-        return DB::transaction(function () use ($pago, $monto, $motivo, $solicitante, $claveIdempotencia, $devolucionId) {
-            $existente = Reembolso::where('clave_idempotencia', $claveIdempotencia)->lockForUpdate()->first();
-            if ($existente) {
-                if ($existente->pago_id !== $pago->id) {
-                    throw new \DomainException('La clave de idempotencia ya está en uso.');
-                }
-                return $existente;
-            }
-
-            $p = $this->pagos->bloquear($pago->id);
-
-            if (!in_array($p->estado, [EstadoPago::Recibido, EstadoPago::ReembolsadoParcial], true)) {
-                throw new TransicionInvalida('Solo se pueden reembolsar pagos recibidos.');
-            }
-
-            $disponible = $this->disponible($p);
-            if ($monto->mayorQue($disponible)) {
-                throw new \DomainException("El reembolso supera el importe disponible ({$disponible->decimal()} BOB).");
-            }
-
-            $montoProveedor = $p->proveedor === Pago::PROVEEDOR_PAYPAL ? $this->importeProveedor($p, $monto, $disponible) : null;
-
-            $reembolso = Reembolso::create([
-                'uuid' => (string) Str::uuid(),
-                'clave_idempotencia' => $claveIdempotencia,
-                'pago_id' => $p->id,
-                'devolucion_id' => $devolucionId,
-                'estado' => EstadoReembolso::Solicitado,
-                'origen' => Reembolso::ORIGEN_APLICACION,
-                'monto' => $monto->decimal(),
-                'moneda' => 'BOB',
-                'monto_proveedor' => $montoProveedor?->decimal(),
-                'moneda_proveedor' => $montoProveedor?->moneda,
-                'tasa_aplicada' => $p->tasa_aplicada,
-                'motivo' => $motivo,
-                'ci_solicitado_por' => $solicitante->ci,
-                'solicitado_at' => now(),
-            ]);
-
-            $this->pagos->evento($p, 'reembolso_solicitado', [
-                'reembolso' => $reembolso->uuid, 'monto' => $monto->decimal(), 'motivo' => $motivo,
-            ], $solicitante);
-
-            return $reembolso;
-        });
-    }
-
     /**
-     * Autoriza y ejecuta. PayPal: llamada a la API fuera de la transacción.
-     * Presencial: queda 'autorizado' hasta confirmar la entrega del dinero.
-     */
-    public function autorizarYEjecutar(Reembolso $reembolso, Usuario $admin): Reembolso
-    {
-        $r = DB::transaction(function () use ($reembolso, $admin) {
-            $r = Reembolso::whereKey($reembolso->id)->lockForUpdate()->firstOrFail();
-            if ($r->estado !== EstadoReembolso::Solicitado) {
-                return $r; // idempotente: ya autorizado o procesado
-            }
-            $this->cambiarEstado($r, EstadoReembolso::Autorizado, ['ci_autorizado_por' => $admin->ci, 'autorizado_at' => now()], $admin);
-
-            if ($r->pago->proveedor === Pago::PROVEEDOR_PAYPAL) {
-                $this->cambiarEstado($r, EstadoReembolso::Procesando, [], $admin);
-            }
-
-            return $r;
-        });
-
-        if ($r->estado !== EstadoReembolso::Procesando || $r->referencia_externa !== null) {
-            return $r;
-        }
-
-        $pago = $r->pago;
-        try {
-            $resultado = $this->gateway->reembolsarCaptura(
-                (string) $pago->referencia_captura,
-                Dinero::deDecimal((string) $r->monto_proveedor, (string) $r->moneda_proveedor),
-                'reembolso-' . $r->uuid,
-                $r->motivo,
-            );
-        } catch (GatewayIncierto $e) {
-            return $this->resolver($r, EstadoReembolso::Incierto, [], ['error' => $e->getMessage()], $admin);
-        } catch (GatewayRechazo $e) {
-            return $this->resolver($r, EstadoReembolso::Fallido, [], ['codigo' => $e->codigo, 'mensaje' => $e->getMessage()], $admin);
-        }
-
-        return $this->aplicarResultado($r, $resultado, $admin);
-    }
-
-    /**
-     * Reembolso presencial: el personal confirma que devolvió el dinero.
-     *
-     * Etapa 3 (D7): en EFECTIVO el dinero sale de la caja abierta de quien lo
-     * entrega (obligatoria; se bloquea y queda asociada) y no puede superar el
-     * efectivo esperado de esa caja. Por tarjeta, transferencia o QR no resta
-     * efectivo; si quien entrega tiene caja abierta, se asocia a ella solo como
-     * referencia. Repetir la confirmación no vuelve a restar.
-     */
-    public function confirmarEntrega(Reembolso $reembolso, Usuario $usuario, ?string $medio = null): Reembolso
-    {
-        return DB::transaction(function () use ($reembolso, $usuario, $medio) {
-            $r = Reembolso::whereKey($reembolso->id)->lockForUpdate()->firstOrFail();
-            if ($r->pago->proveedor !== Pago::PROVEEDOR_MANUAL) {
-                throw new TransicionInvalida('Los reembolsos de PayPal se confirman con la respuesta del proveedor.');
-            }
-            if ($r->estado === EstadoReembolso::Completado) {
-                return $r; // idempotente: no se resta dos veces
-            }
-            if ($r->estado !== EstadoReembolso::Autorizado) {
-                throw new TransicionInvalida('El reembolso debe estar autorizado.');
-            }
-
-            $medio ??= $this->medioPorDefecto($r->pago);
-            if (!in_array($medio, Reembolso::MEDIOS_PRESENCIALES, true)) {
-                throw new \DomainException('Medio de devolución no válido para un reembolso presencial.');
-            }
-
-            $caja = Caja::where('user_id', $usuario->ci)->where('estado', Caja::ABIERTA)->lockForUpdate()->first();
-            if ($medio === Reembolso::MEDIO_EFECTIVO) {
-                if (!$caja) {
-                    throw new \DomainException('Para entregar un reembolso en efectivo debes tener tu caja abierta.');
-                }
-                $disponible = $this->arqueo->calcular($caja)->efectivoEsperado;
-                if ($r->importe()->mayorQue($disponible)) {
-                    throw new \DomainException("El reembolso supera el efectivo esperado en tu caja ({$disponible->decimal()} BOB).");
-                }
-            }
-
-            $this->cambiarEstado($r, EstadoReembolso::Completado, [
-                'completado_at' => now(),
-                'entregado_at' => now(),
-                'ci_entregado_por' => $usuario->ci,
-                'medio_devolucion' => $medio,
-                'caja_id' => $caja?->id,
-            ], $usuario, ['entrega_confirmada_por' => $usuario->ci, 'medio_devolucion' => $medio, 'caja' => $caja?->id]);
-            $this->actualizarPago($r->pago, $usuario);
-
-            if ($caja) {
-                $this->cajas->evento($caja, CajaEvento::REEMBOLSO_ENTREGADO, $usuario, [
-                    'reembolso' => $r->uuid, 'monto' => (string) $r->monto, 'medio' => $medio,
-                    'resta_efectivo' => $medio === Reembolso::MEDIO_EFECTIVO,
-                ]);
-            }
-
-            return $r;
-        });
-    }
-
-    public function rechazar(Reembolso $reembolso, Usuario $admin, string $motivo): Reembolso
-    {
-        return DB::transaction(function () use ($reembolso, $admin, $motivo) {
-            $r = Reembolso::whereKey($reembolso->id)->lockForUpdate()->firstOrFail();
-            if ($r->estado !== EstadoReembolso::Solicitado) {
-                throw new TransicionInvalida('Solo se rechazan reembolsos solicitados.');
-            }
-            $this->cambiarEstado($r, EstadoReembolso::Rechazado, ['ci_autorizado_por' => $admin->ci, 'autorizado_at' => now()], $admin, ['motivo_rechazo' => $motivo]);
-
-            return $r;
-        });
-    }
-
-    /**
-     * Resultado del proveedor (respuesta directa, conciliación o webhook).
+     * Resultado del proveedor para un reembolso del historial (webhook o
+     * consulta de la conciliación de PayPal).
      */
     public function aplicarResultado(Reembolso $reembolso, ResultadoReembolso $resultado, ?Usuario $usuario = null): Reembolso
     {
@@ -301,32 +114,6 @@ class ReembolsoService
     }
 
     // ───────────────────────── Internos ─────────────────────────
-
-    /**
-     * USD del reembolso con la tasa ORIGINAL; el último reembolso usa el USD
-     * restante exacto (sin deriva por redondeo).
-     */
-    private function importeProveedor(Pago $pago, Dinero $monto, Dinero $disponible): Dinero
-    {
-        $usdPago = $pago->importeProveedor();
-        $usdComprometido = Dinero::cero($usdPago->moneda);
-        foreach ($pago->reembolsos()->get() as $r) {
-            if ($r->estado->comprometeImporte() && $r->monto_proveedor !== null) {
-                $usdComprometido = $usdComprometido->sumar(Dinero::deDecimal((string) $r->monto_proveedor, (string) $r->moneda_proveedor));
-            }
-        }
-        $usdRestante = $usdPago->restar($usdComprometido);
-
-        if ($monto->igualA($disponible)) {
-            return $usdRestante;
-        }
-
-        $usd = $pago->tasa_aplicada !== null
-            ? $monto->convertirDividiendo((string) $pago->tasa_aplicada, $usdPago->moneda)
-            : Dinero::deCentavos($monto->centavos, $usdPago->moneda); // histórico sin tasa: mismos importes registrados
-
-        return $usd->mayorQue($usdRestante) ? $usdRestante : $usd;
-    }
 
     private function resolver(Reembolso $reembolso, EstadoReembolso $estado, array $cambios, array $datos, ?Usuario $usuario): Reembolso
     {

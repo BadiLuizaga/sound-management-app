@@ -13,13 +13,13 @@ use Illuminate\Support\Facades\Http;
  *
  * Modos de captura: ok | monto_distinto | custom_distinto | incierto_500 | incierto_conexion | rechazada | pendiente
  * Estado de consulta de orden: COMPLETED | APPROVED | CREATED | 500 | 404
- * Modos de reembolso: ok | pendiente | incierto_500 | rechazado
+ * Reembolsos: solo se consultan (GET); SOUND POS no los ejecuta. Si una
+ * prueba intentara uno, se cuenta en $reembolsosSolicitados y responde error.
  */
 class PayPalFalso
 {
     public string $modoCaptura = 'ok';
     public string $estadoConsulta = 'COMPLETED';
-    public string $modoReembolso = 'ok';
     public string $modoCrear = 'ok';
     public bool $firmaValida = true;
     public bool $verificacionCaida = false;
@@ -114,15 +114,10 @@ class PayPalFalso
             };
         }
 
-        if ($metodo === 'POST' && preg_match('#^/v2/payments/captures/([^/]+)/refund$#', $ruta, $m)) {
+        // SOUND POS no ejecuta reembolsos: una solicitud de reembolso es un error de la prueba
+        if ($metodo === 'POST' && preg_match('#^/v2/payments/captures/([^/]+)/refund$#', $ruta)) {
             $this->reembolsosSolicitados++;
-            $monto = $r->data()['amount'];
-            return match ($this->modoReembolso) {
-                'incierto_500' => Http::response(['name' => 'INTERNAL_SERVER_ERROR'], 503),
-                'rechazado' => Http::response(['name' => 'UNPROCESSABLE_ENTITY', 'message' => 'Refund refused'], 422),
-                'pendiente' => Http::response(['id' => 'REF-' . md5($r->header('PayPal-Request-Id')[0]), 'status' => 'PENDING', 'amount' => $monto], 201),
-                default => Http::response(['id' => 'REF-' . md5($r->header('PayPal-Request-Id')[0]), 'status' => 'COMPLETED', 'amount' => $monto], 201),
-            };
+            return Http::response(['name' => 'REEMBOLSO_NO_PERMITIDO_EN_SOUND_POS'], 500);
         }
 
         if ($metodo === 'GET' && preg_match('#^/v2/payments/refunds/([^/]+)$#', $ruta, $m)) {

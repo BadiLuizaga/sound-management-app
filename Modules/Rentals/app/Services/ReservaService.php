@@ -29,7 +29,8 @@ use Modules\Rentals\Models\ReservaEvento;
  *    afectadas (FOR UPDATE, ordenadas por id) y recalcula la disponibilidad
  *    dentro del bloqueo. Crear o pagar nunca bloquea equipos.
  *  - Sin disponibilidad se rechaza al instante con el detalle de faltantes (D2).
- *  - Cancelar libera las unidades; los reembolsos siguen su circuito (D7).
+ *  - Cancelar libera las unidades. SOUND POS no gestiona reembolsos: los pagos
+ *    de la reserva no se tocan.
  *  - Cada cambio deja un evento en reserva_eventos (solo inserción) y en la bitácora.
  */
 class ReservaService
@@ -207,7 +208,7 @@ class ReservaService
 
     /**
      * Cancela una reserva pendiente o confirmada y libera sus unidades.
-     * No toca los pagos: un reembolso sigue el circuito de reembolsos (D7).
+     * No toca los pagos (SOUND POS no gestiona reembolsos).
      */
     public function cancelar(Reserva|int $reserva, Usuario $responsable, string $motivo): Reserva
     {
@@ -237,7 +238,7 @@ class ReservaService
             $this->evento($r, ReservaEvento::CANCELADA, $estado, EstadoReserva::Cancelada, $responsable, [
                 'motivo' => $motivo,
                 'unidades_liberadas' => $liberadas,
-                // D7: sin penalidad automática; si hubo cobros, el reembolso se solicita aparte
+                // SOUND POS no devuelve dinero: el estado de pago queda solo como referencia
                 'estado_pago' => $r->estado_pago,
             ]);
             Bitacora::registrar('RESERVA_CANCELADA', 'reservas', $r->id, "Reserva {$r->codigo} cancelada por CI {$responsable->ci}: {$motivo}");

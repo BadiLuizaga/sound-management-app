@@ -9,8 +9,6 @@ use Illuminate\Support\Str;
 use Modules\Access\Models\Rol;
 use Modules\Audit\Services\ReadOnlySqlGuard;
 use Modules\Finance\Models\Pago;
-use Modules\Finance\Services\ReembolsoService;
-use Modules\Finance\Support\Dinero;
 use Modules\Finance\Tests\Support\EscenarioFinanzas;
 use Modules\Finance\Tests\Support\PayPalFalso;
 use Modules\Sales\Models\MetodoPago;
@@ -97,39 +95,6 @@ class PermisosFinanzasTest extends TestCase
         $this->assertTrue(\Modules\Finance\Models\TipoCambio::whereDate('fecha_aplicacion', '2026-11-25')->exists());
     }
 
-    public function test_reembolso_encargado_solicita_admin_autoriza(): void
-    {
-        $encargado = $this->usuarioConRol('Encargado');
-        $pago = $this->pagoDe($this->usuarioConRol('Vendedor'), 'recibido', MetodoPago::TARJETA);
-
-        $this->actingAs($encargado)->post(route('finanzas.admin.reembolsos.solicitar', $pago), [
-            'monto' => '30', 'motivo' => 'Prueba', 'clave_idempotencia' => (string) Str::uuid(),
-        ])->assertSessionHas('success');
-
-        $reembolso = $pago->reembolsos()->firstOrFail();
-        $this->actingAs($encargado)->post(route('finanzas.admin.reembolsos.autorizar', $reembolso))->assertForbidden();
-        $this->actingAs($this->usuarioConRol('Vendedor'))->post(route('finanzas.admin.reembolsos.solicitar', $pago), [
-            'monto' => '1', 'motivo' => 'x', 'clave_idempotencia' => (string) Str::uuid(),
-        ])->assertForbidden();
-
-        $this->actingAs($this->admin)->post(route('finanzas.admin.reembolsos.autorizar', $reembolso))->assertSessionHas('success');
-        $this->assertSame('autorizado', $reembolso->fresh()->estado->value); // caja: falta confirmar entrega
-
-        $this->actingAs($encargado)->post(route('finanzas.admin.reembolsos.confirmar-entrega', $reembolso))->assertSessionHas('success');
-        $this->assertSame('completado', $reembolso->fresh()->estado->value);
-    }
-
-    public function test_el_administrador_puede_hacer_el_proceso_completo(): void
-    {
-        $pago = $this->pagoDe($this->usuarioConRol('Vendedor'), 'recibido', MetodoPago::TARJETA);
-
-        $this->actingAs($this->admin)->post(route('finanzas.admin.reembolsos.solicitar', $pago), [
-            'monto' => '80', 'motivo' => 'Completo', 'clave_idempotencia' => (string) Str::uuid(), 'ejecutar' => 1,
-        ])->assertSessionHas('success');
-
-        $this->assertSame('autorizado', $pago->reembolsos()->first()->estado->value);
-    }
-
     public function test_botones_coherentes_con_los_permisos(): void
     {
         $vendedor = $this->usuarioConRol('Vendedor');
@@ -144,13 +109,13 @@ class PermisosFinanzasTest extends TestCase
         $this->actingAs($encargado)->get(route('finanzas.admin.pagos.show', $pendiente))->assertOk()
             ->assertSee(route('finanzas.admin.pagos.verificar', $pendiente), false);
 
-        // Reembolso solicitado: solo el admin ve "Autorizar y ejecutar"
+        // SOUND POS no gestiona reembolsos: nadie ve acciones de reembolso
         $recibido = $this->pagoDe($vendedor, 'recibido', MetodoPago::TARJETA);
-        $r = app(ReembolsoService::class)->solicitar($recibido, Dinero::deDecimal('10', 'BOB'), 'x', $encargado, 'clave-boton-000000001');
-        $this->actingAs($encargado)->get(route('finanzas.admin.pagos.show', $recibido))
-            ->assertDontSee(route('finanzas.admin.reembolsos.autorizar', $r), false);
-        $this->actingAs($this->admin)->get(route('finanzas.admin.pagos.show', $recibido))
-            ->assertSee(route('finanzas.admin.reembolsos.autorizar', $r), false);
+        foreach ([$encargado, $this->admin] as $usuario) {
+            $this->actingAs($usuario)->get(route('finanzas.admin.pagos.show', $recibido))->assertOk()
+                ->assertDontSee('Solicitar reembolso')
+                ->assertDontSee('/reembolsos', false);
+        }
     }
 
     public function test_menu_lateral_segun_permisos(): void

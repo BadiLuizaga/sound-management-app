@@ -9,7 +9,7 @@ class ConciliarPagos extends Command
 {
     protected $signature = 'finanzas:conciliar';
 
-    protected $description = 'Concilia pagos y reembolsos con PayPal: expira intentos vencidos (nunca los inciertos), resuelve verificaciones, reaplica pagos y reprocesa webhooks.';
+    protected $description = 'Concilia los pagos en línea con PayPal: expira intentos vencidos (nunca los inciertos), resuelve verificaciones, reaplica pagos, consulta reembolsos del historial y reprocesa webhooks. Nunca ejecuta reembolsos.';
 
     public function handle(ConciliacionService $conciliacion): int
     {

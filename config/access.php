@@ -64,8 +64,6 @@ return [
         'finance.payments.register'  => ['admin', 'encargado', 'vendedor'],   // cobro presencial en caja
         'finance.payments.verify'    => ['admin', 'encargado'],               // transferencias y QR
         'finance.payments.reconcile' => ['admin', 'encargado'],               // reintentar / aplicar manualmente
-        'finance.refunds.request'    => ['admin', 'encargado'],               // solicitar y confirmar entrega en caja
-        'finance.refunds.execute'    => ['admin'],                            // autorizar y ejecutar reembolsos
         'finance.exchange.manage'    => ['admin'],                            // tipos de cambio
         'finance.audit.view'         => ['admin'],                            // historial, webhooks
 
@@ -76,7 +74,7 @@ return [
         'cash.movements.income' => ['admin', 'encargado', 'vendedor'],   // D3: ingresos (p. ej., cambio)
         'cash.movements.expense'=> ['admin', 'encargado'],               // D3: egresos y correcciones
         'cash.movements.revert' => ['admin'],                            // reversión correctiva
-        'finance.reports.view'  => ['admin', 'encargado'],               // reportes y conciliación
+        'finance.reports.view'  => ['admin', 'encargado'],               // reportes financieros
     ],
 
 ];

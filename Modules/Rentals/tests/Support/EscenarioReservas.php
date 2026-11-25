@@ -125,7 +125,6 @@ trait EscenarioReservas
             'ci_empleado' => $this->encargado()->ci,
             'fecha_inicio' => $inicio,
             'fecha_fin_estimada' => $finEstimado,
-            'monto_garantia' => 0,
             'total_estimado' => '100.00',
             'estado' => $estado,
             'metodo_pago_id' => MetodoPago::idPorCodigo(MetodoPago::EFECTIVO),

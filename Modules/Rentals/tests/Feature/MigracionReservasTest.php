@@ -14,22 +14,25 @@ use Modules\Sales\Models\MetodoPago;
 use Tests\TestCase;
 
 /**
- * Etapa 4 — paso 1: las 8 migraciones nuevas se revierten y se vuelven a
- * aplicar sin alterar los datos existentes, y se detienen SIN CAMBIOS si el
- * esquema o los datos son incoherentes.
+ * Etapa 4: sus 10 migraciones (8 del paso 1 y 2 de la actualización de alcance
+ * de SOUND POS) se revierten y se vuelven a aplicar sin alterar los datos, y se
+ * detienen SIN CAMBIOS si el esquema o los datos son incoherentes.
  *
  * Igual que MigracionCajasTest: no puede ir dentro de la transacción de
  * RefreshDatabase (en MySQL el DDL confirma implícitamente). Cada prueba parte
  * de un migrate:fresh propio y obliga a la siguiente clase a migrar de cero.
- * Solo se revierten las 8 migraciones de esta etapa.
+ * Solo se revierten migraciones de esta etapa.
  */
 class MigracionReservasTest extends TestCase
 {
-    private const PASOS_ETAPA_4 = 8;
+    /** 8 del paso 1 + 2 de la actualización de alcance */
+    private const PASOS_ETAPA_4 = 10;
+    private const PASOS_ALCANCE = 2;
 
-    private const TABLAS_NUEVAS = [
+    /** Tablas que deja la Etapa 4 (reserva_garantias se crea y después se elimina) */
+    private const TABLAS_ETAPA_4 = [
         'reserva_eventos', 'reserva_entregas', 'reserva_entrega_detalles', 'reserva_incidencias',
-        'reserva_garantias', 'reserva_cargos', 'maquinaria_bloqueos',
+        'reserva_cargos', 'maquinaria_bloqueos',
     ];
 
     protected function setUp(): void
@@ -44,11 +47,13 @@ class MigracionReservasTest extends TestCase
         parent::tearDown();
     }
 
+    // ───────────────────────── Ayudantes ─────────────────────────
+
     private function revertirEtapa4(): void
     {
         Artisan::call('migrate:rollback', ['--step' => self::PASOS_ETAPA_4]);
 
-        foreach (self::TABLAS_NUEVAS as $t) {
+        foreach ([...self::TABLAS_ETAPA_4, 'reserva_garantias'] as $t) {
             $this->assertFalse(Schema::hasTable($t), "La reversión debía quitar {$t}");
         }
         $this->assertFalse(Schema::hasColumn('pagos', 'concepto'));
@@ -56,14 +61,7 @@ class MigracionReservasTest extends TestCase
         // Las tablas de etapas anteriores siguen ahí
         $this->assertTrue(Schema::hasTable('caja_eventos'));
         $this->assertTrue(Schema::hasTable('reserva_equipos'));
-
-        $indicesPagos = collect(Schema::getIndexes('pagos'));
-        $this->assertFalse($indicesPagos->pluck('name')->contains('pagos_reserva_concepto_index'));
-        if (DB::getDriverName() === 'mysql') {
-            // La FK pagos.reserva_id vuelve a tener su índice simple, como antes de la Etapa 4
-            $this->assertTrue($indicesPagos->contains(fn ($i) => $i['columns'] === ['reserva_id']), 'Falta el índice simple de pagos.reserva_id');
-            $this->assertFalse($this->checksMysql()->contains('pagos_concepto_garantia_check'));
-        }
+        $this->assertIndiceSimpleDeReservaEnPagos();
     }
 
     private function checksMysql()
@@ -72,17 +70,34 @@ class MigracionReservasTest extends TestCase
             ->pluck('n')->map(fn ($n) => strtolower($n));
     }
 
-    private function assertEsquemaEtapa4Completo(): void
+    /** MySQL: la FK pagos.reserva_id siempre debe tener un índice simple utilizable. */
+    private function assertIndiceSimpleDeReservaEnPagos(): void
     {
-        foreach (self::TABLAS_NUEVAS as $t) {
+        $indices = collect(Schema::getIndexes('pagos'));
+        $this->assertFalse($indices->pluck('name')->contains('pagos_reserva_concepto_index'));
+        if (DB::getDriverName() === 'mysql') {
+            $this->assertTrue($indices->contains(fn ($i) => $i['columns'] === ['reserva_id']), 'Falta el índice simple de pagos.reserva_id');
+        }
+    }
+
+    /** Estado final de la Etapa 4 (alcance de SOUND POS). */
+    private function assertEsquemaFinal(): void
+    {
+        foreach (self::TABLAS_ETAPA_4 as $t) {
             $this->assertTrue(Schema::hasTable($t), "Falta {$t}");
         }
-        $this->assertTrue(Schema::hasColumn('pagos', 'concepto'));
-        $this->assertTrue(collect(Schema::getIndexes('pagos'))->pluck('name')->contains('pagos_reserva_concepto_index'));
+        $this->assertFalse(Schema::hasTable('reserva_garantias'));
+        $this->assertFalse(Schema::hasColumn('pagos', 'concepto'));
+        $this->assertFalse(Schema::hasColumn('reserva_cargos', 'horas'));
+        $this->assertTrue(Schema::hasColumn('reservas', 'total_cargos'));
+        $this->assertIndiceSimpleDeReservaEnPagos();
         if (DB::getDriverName() === 'mysql') {
             $checks = $this->checksMysql();
-            foreach (['pagos_concepto_garantia_check', 'reservas_total_cargos_check', 'reserva_garantias_monto_check', 'maquinaria_bloqueos_intervalo_check'] as $c) {
+            foreach (['reservas_total_cargos_check', 'reserva_cargos_monto_check', 'maquinaria_bloqueos_intervalo_check'] as $c) {
                 $this->assertTrue($checks->contains($c), "Falta la restricción {$c}");
+            }
+            foreach (['pagos_concepto_garantia_check', 'reserva_cargos_horas_check', 'reserva_garantias_monto_check'] as $c) {
+                $this->assertFalse($checks->contains($c), "Sobra la restricción {$c}");
             }
         }
     }
@@ -124,7 +139,14 @@ class MigracionReservasTest extends TestCase
         return (array) DB::table($tabla)->where('id', $id)->first();
     }
 
-    public function test_datos_existentes_se_conservan_y_los_pagos_quedan_como_alquiler(): void
+    // ───────────────────────── Etapa 4 completa ─────────────────────────
+
+    public function test_el_estado_final_no_tiene_garantias_ni_horas_extra(): void
+    {
+        $this->assertEsquemaFinal();
+    }
+
+    public function test_datos_existentes_se_conservan_en_toda_la_etapa(): void
     {
         $this->revertirEtapa4();
 
@@ -151,24 +173,22 @@ class MigracionReservasTest extends TestCase
                 $this->assertEquals($valor, $despues[$clave][$columna], "{$clave}.{$columna} cambió al migrar");
             }
         }
+        // Los pagos quedan con exactamente las mismas columnas (concepto se creó y se quitó)
+        $this->assertSame(array_keys($antes['pago1']), array_keys($despues['pago1']));
 
-        // Columnas nuevas: valores neutros, sin inventar datos
-        $this->assertSame('alquiler', $despues['pago1']['concepto']);
-        $this->assertSame('alquiler', $despues['pago2']['concepto']);
+        // Columnas nuevas de reservas: valores neutros, sin inventar datos
         $this->assertNull($despues['reserva']['canal']);
         $this->assertEquals(0, $despues['reserva']['total_cargos']);
         $this->assertNull($despues['reserva']['clave_idempotencia']);
-        foreach (self::TABLAS_NUEVAS as $t) {
-            $this->assertTrue(Schema::hasTable($t));
+        foreach (self::TABLAS_ETAPA_4 as $t) {
             $this->assertSame(0, DB::table($t)->count(), "{$t} debía quedar vacía");
         }
 
-        // Ciclo completo otra vez: revertir y volver a aplicar conserva los datos
+        // Ciclo completo otra vez
         $this->revertirEtapa4();
         $this->assertEquals($antes['pago1']['monto'], $this->fila('pagos', $pagoReserva)['monto']);
         Artisan::call('migrate');
-        $this->assertSame('alquiler', $this->fila('pagos', $pagoReserva)['concepto']);
-        $this->assertEsquemaEtapa4Completo();
+        $this->assertEsquemaFinal();
     }
 
     public function test_se_detiene_sin_cambios_si_el_esquema_ya_tiene_las_columnas(): void
@@ -186,10 +206,9 @@ class MigracionReservasTest extends TestCase
             $this->assertStringContainsString('canal', $e->getMessage());
         }
 
-        // Nada de la Etapa 4 se aplicó
         $this->assertFalse(Schema::hasColumn('reservas', 'total_cargos'));
         $this->assertFalse(Schema::hasColumn('pagos', 'concepto'));
-        foreach (self::TABLAS_NUEVAS as $t) {
+        foreach (self::TABLAS_ETAPA_4 as $t) {
             $this->assertFalse(Schema::hasTable($t));
         }
     }
@@ -205,7 +224,6 @@ class MigracionReservasTest extends TestCase
             return;
         }
 
-        // SQLite no tiene esas CHECK: la migración lo detecta antes de cambiar nada
         $this->reservaCruda($cliente->ci, ['fecha_fin' => '2026-12-01 09:00:00']);
 
         try {
@@ -217,18 +235,77 @@ class MigracionReservasTest extends TestCase
         }
 
         $this->assertFalse(Schema::hasColumn('reservas', 'canal'));
-        $this->assertFalse(Schema::hasColumn('pagos', 'concepto'));
         $this->assertFalse(Schema::hasTable('reserva_eventos'));
     }
 
-    public function test_hay_50_migraciones_y_las_8_nuevas_son_las_ultimas(): void
+    // ───────────────────────── Actualización de alcance ─────────────────────────
+
+    public function test_la_actualizacion_de_alcance_se_revierte_y_se_reaplica(): void
+    {
+        Artisan::call('migrate:rollback', ['--step' => self::PASOS_ALCANCE]);
+
+        // Estado del paso 1, restaurado exactamente
+        $this->assertTrue(Schema::hasTable('reserva_garantias'));
+        $this->assertTrue(Schema::hasColumn('pagos', 'concepto'));
+        $this->assertTrue(Schema::hasColumn('reserva_cargos', 'horas'));
+        $this->assertTrue(collect(Schema::getIndexes('pagos'))->pluck('name')->contains('pagos_reserva_concepto_index'));
+        if (DB::getDriverName() === 'mysql') {
+            $checks = $this->checksMysql();
+            foreach (['pagos_concepto_garantia_check', 'reserva_cargos_horas_check', 'reserva_garantias_monto_check', 'reserva_garantias_dinero_check'] as $c) {
+                $this->assertTrue($checks->contains($c), "Falta la restricción {$c} tras revertir");
+            }
+        }
+
+        Artisan::call('migrate');
+        $this->assertEsquemaFinal();
+    }
+
+    public function test_la_actualizacion_se_detiene_si_hay_garantias_u_horas_extra(): void
+    {
+        Artisan::call('migrate:rollback', ['--step' => self::PASOS_ALCANCE]);
+
+        $cliente = UsuarioFactory::new()->cliente()->create();
+        $encargado = UsuarioFactory::new()->conRol('Encargado')->create();
+        $reserva = $this->reservaCruda($cliente->ci);
+        DB::table('reserva_cargos')->insert([
+            'reserva_id' => $reserva, 'concepto' => 'horas_extra', 'horas' => 2, 'monto' => '100.00', 'moneda' => 'BOB',
+            'estado' => 'vigente', 'ci_registrado_por' => $encargado->ci, 'clave_idempotencia' => 'he-1',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        try {
+            Artisan::call('migrate');
+            $this->fail('La migración debía detenerse');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('No se modificó nada', $e->getMessage());
+            $this->assertStringContainsString('1 cargo(s) por horas extra', $e->getMessage());
+        }
+        $this->assertTrue(Schema::hasTable('reserva_garantias'));
+        $this->assertTrue(Schema::hasColumn('reserva_cargos', 'horas'));
+        $this->assertSame(1, DB::table('reserva_cargos')->count());
+
+        // Sin el cargo, la de Rentals avanza; un pago de garantía detiene la de Finanzas
+        DB::table('reserva_cargos')->delete();
+        $pago = $this->pagoCrudo(['reserva_id' => $reserva, 'concepto' => 'garantia']);
+        try {
+            Artisan::call('migrate');
+            $this->fail('La migración de pagos debía detenerse');
+        } catch (\RuntimeException $e) {
+            $this->assertStringContainsString('1 pago(s) registrados como garantía', $e->getMessage());
+        }
+        $this->assertFalse(Schema::hasTable('reserva_garantias'));
+        $this->assertTrue(Schema::hasColumn('pagos', 'concepto'));
+        $this->assertSame('garantia', $this->fila('pagos', $pago)['concepto']);
+    }
+
+    public function test_hay_52_migraciones_y_las_10_de_la_etapa_4_son_las_ultimas(): void
     {
         $archivos = collect(array_merge(
             glob(base_path('database/migrations/*.php')),
             glob(base_path('Modules/*/database/migrations/*.php'))
         ))->map(fn ($f) => basename($f, '.php'))->sort()->values();
 
-        $this->assertCount(50, $archivos);
+        $this->assertCount(52, $archivos);
         $this->assertSame([
             '2026_11_25_000001_add_operacion_to_reservas_table',
             '2026_11_25_000002_create_reserva_eventos_table',
@@ -238,9 +315,10 @@ class MigracionReservasTest extends TestCase
             '2026_11_25_000006_create_reserva_cargos_table',
             '2026_11_25_000007_create_maquinaria_bloqueos_table',
             '2026_11_25_000008_add_concepto_to_pagos_table',
+            '2026_11_26_000001_remove_garantias_y_horas_extra_de_reservas',
+            '2026_11_26_000002_remove_concepto_from_pagos_table',
         ], $archivos->slice(-self::PASOS_ETAPA_4)->values()->all());
 
-        $ejecutadas = DB::table('migrations')->pluck('migration');
-        $this->assertCount(50, $ejecutadas);
+        $this->assertCount(52, DB::table('migrations')->pluck('migration'));
     }
 }

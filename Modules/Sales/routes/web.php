@@ -5,7 +5,7 @@ use Modules\Sales\Http\Controllers\CartController;
 use Modules\Sales\Http\Controllers\VentaController;
 use Modules\Sales\Http\Controllers\PromocionController;
 // Etapa 3: la caja la gestiona el módulo Finance (el CajaController heredado de
-// Sales se conserva sin uso). Se mantienen los nombres de ruta caja.*.
+// Sales se eliminó por no tener uso). Se mantienen los nombres de ruta caja.*.
 use Modules\Finance\Http\Controllers\Admin\CajaController;
 
 // ─────────────────────────────────────────────────────────

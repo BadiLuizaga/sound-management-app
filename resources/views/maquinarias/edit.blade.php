@@ -47,10 +47,6 @@
                 <label for="precio_dia" style="display: block; font-size: 0.9rem; font-weight: 600; color: #475569; margin-bottom: 6px;">Precio por Día (BOB) *</label>
                 <input type="number" step="0.01" name="precio_dia" id="precio_dia" value="{{ old('precio_dia', $maquinaria->precio_dia) }}" min="0" required style="width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 0.95rem; outline: none; transition: border-color 0.2s;" onfocus="this.style.borderColor='var(--primary)'" onblur="this.style.borderColor='#cbd5e1'">
             </div>
-            <div>
-                <label for="garantia_sugerida" style="display: block; font-size: 0.9rem; font-weight: 600; color: #475569; margin-bottom: 6px;">Garantía Sugerida (BOB) *</label>
-                <input type="number" step="0.01" name="garantia_sugerida" id="garantia_sugerida" value="{{ old('garantia_sugerida', $maquinaria->garantia_sugerida) }}" min="0" required style="width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 0.95rem; outline: none; transition: border-color 0.2s;" onfocus="this.style.borderColor='var(--primary)'" onblur="this.style.borderColor='#cbd5e1'">
-            </div>
         </div>
 
         <div style="display: flex; justify-content: flex-end; gap: 12px;">

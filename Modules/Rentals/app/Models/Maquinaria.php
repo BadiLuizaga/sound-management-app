@@ -14,7 +14,6 @@ class Maquinaria extends Model
         'descripcion',
         'precio_hora',
         'precio_dia',
-        'garantia_sugerida',
         'estado',
         'cantidad_total',
     ];

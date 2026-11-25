@@ -6,12 +6,12 @@ use Illuminate\Database\Eloquent\Model;
 use Modules\Access\Models\Usuario;
 
 /**
- * Cargo adicional de una reserva (horas extra, daño, faltante u otro).
- * No se elimina: se anula. Fase 2 — Etapa 4 (paso 1): solo estructura.
+ * Cargo adicional de una reserva por daño, faltante u otro motivo. SOUND POS
+ * no cobra horas adicionales. No se elimina: se anula.
+ * Fase 2 — Etapa 4 (paso 1): solo estructura.
  */
 class ReservaCargo extends Model
 {
-    public const CONCEPTO_HORAS_EXTRA = 'horas_extra';
     public const CONCEPTO_DANO = 'dano';
     public const CONCEPTO_FALTANTE = 'faltante';
     public const CONCEPTO_OTRO = 'otro';
@@ -22,14 +22,13 @@ class ReservaCargo extends Model
     protected $table = 'reserva_cargos';
 
     protected $fillable = [
-        'reserva_id', 'concepto', 'descripcion', 'horas', 'monto', 'moneda', 'incidencia_id',
+        'reserva_id', 'concepto', 'descripcion', 'monto', 'moneda', 'incidencia_id',
         'estado', 'motivo_anulacion', 'ci_registrado_por', 'ci_anulado_por', 'anulado_at', 'clave_idempotencia',
     ];
 
     protected function casts(): array
     {
         return [
-            'horas' => 'integer',
             'monto' => 'decimal:2',
             'anulado_at' => 'datetime',
         ];

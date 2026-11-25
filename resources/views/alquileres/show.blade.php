@@ -110,12 +110,14 @@
             </div>
             @endif
 
-            <!-- Garantía -->
+            {{-- Garantía: solo dato histórico de alquileres anteriores (SOUND POS ya no gestiona garantías) --}}
+            @if($alquiler->garantizado_con || (float) $alquiler->monto_garantia > 0)
             <div style="margin-bottom: 16px; border-bottom: 1px solid #f1f5f9; padding-bottom: 16px;">
-                <span style="font-size: 0.75rem; color: #94a3b8; font-weight: 600; display: block; margin-bottom: 4px;">GARANTÍA DEPOSITADA</span>
+                <span style="font-size: 0.75rem; color: #94a3b8; font-weight: 600; display: block; margin-bottom: 4px;">GARANTÍA (HISTÓRICO)</span>
                 <span style="font-size: 0.9rem; font-weight: 600; color: #334155; display: block;">{{ $alquiler->garantizado_con }}</span>
                 <span style="font-size: 0.85rem; color: #475569; display: block;">Monto efectivo: {{ number_format($alquiler->monto_garantia, 2) }} BOB</span>
             </div>
+            @endif
 
             <!-- Precios -->
             <div style="display: flex; flex-direction: column; gap: 8px;">

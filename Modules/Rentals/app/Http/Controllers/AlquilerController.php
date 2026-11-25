@@ -16,7 +16,6 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Barryvdh\DomPDF\Facade\Pdf;
-use Carbon\Carbon;
 
 class AlquilerController extends Controller
 {
@@ -71,8 +70,6 @@ class AlquilerController extends Controller
             'metodo_pago_id' => ['required', MetodoPago::reglaPresencial()],
             'fecha_inicio' => 'required|date',
             'fecha_fin_estimada' => 'required|date|after:fecha_inicio',
-            'garantizado_con' => 'required|string|max:255',
-            'monto_garantia' => 'required|numeric|min:0',
             'maquinarias' => 'required|array|min:1',
             'maquinarias.*.id' => 'required|exists:maquinarias,id',
             'maquinarias.*.tipo_tarifa' => 'required|in:hora,dia',
@@ -131,8 +128,7 @@ class AlquilerController extends Controller
                 'ci_empleado' => Auth::user()->ci,
                 'fecha_inicio' => $request->fecha_inicio,
                 'fecha_fin_estimada' => $request->fecha_fin_estimada,
-                'garantizado_con' => $request->garantizado_con,
-                'monto_garantia' => $request->monto_garantia,
+                // SOUND POS no gestiona garantías: las columnas quedan solo como historial
                 'total_estimado' => $totalEstimado,
                 'estado' => 'activo',
                 'metodo_pago_id' => $request->metodo_pago_id,
@@ -186,7 +182,7 @@ class AlquilerController extends Controller
             abort(403, 'No autorizado');
         }
 
-        $alquiler = Alquiler::findOrFail($id);
+        $alquiler = Alquiler::with('detalles.maquinaria')->findOrFail($id);
 
         if ($alquiler->estado === 'completado') {
             return redirect()->back()->with('error', 'Este alquiler ya ha sido devuelto anteriormente.');
@@ -196,36 +192,16 @@ class AlquilerController extends Controller
 
         try {
             $fechaDevolucion = now();
-            $totalReal = 0;
 
-            // Recalcular montos reales basados en el tiempo transcurrido
+            // Devolución normal: los equipos vuelven a estar disponibles. SOUND POS no
+            // controla retrasos ni cobra horas adicionales: el total es el pactado.
             foreach ($alquiler->detalles as $detalle) {
-                $maq = $detalle->maquinaria;
-
-                // Devolver maquinaria al estado disponible
-                if ($maq) {
-                    $maq->estado = 'disponible';
-                    $maq->save();
+                if ($detalle->maquinaria) {
+                    $detalle->maquinaria->estado = 'disponible';
+                    $detalle->maquinaria->save();
                 }
-
-                // Cálculo de tiempo transcurrido real
-                $fechaInicio = Carbon::parse($alquiler->fecha_inicio);
-                $diferencia = $fechaInicio->diffInHours($fechaDevolucion);
-
-                if ($detalle->tipo_tarifa === 'dia') {
-                    // Mínimo 1 día
-                    $tiempoReal = max(1, ceil($diferencia / 24));
-                } else {
-                    // Mínimo 1 hora
-                    $tiempoReal = max(1, ceil($diferencia));
-                }
-
-                $totalReal += $detalle->precio_unitario * $tiempoReal;
-
-                // Guardar tiempo real en el detalle
-                $detalle->tiempo_rentado = $tiempoReal;
-                $detalle->save();
             }
+            $totalReal = $alquiler->total_estimado;
 
             // Actualizar alquiler
             $alquiler->update([

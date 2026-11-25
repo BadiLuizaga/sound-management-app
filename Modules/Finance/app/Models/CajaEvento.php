@@ -21,6 +21,7 @@ class CajaEvento extends Model
     public const EGRESO = 'egreso';
     public const REVERSION = 'reversion_movimiento';
     public const CORRECCION_RECIBIDA = 'correccion_recibida';
+    /** Solo historial: la entrega de reembolsos en caja ya no existe en SOUND POS. */
     public const REEMBOLSO_ENTREGADO = 'reembolso_entregado';
     public const INTENTO_RECHAZADO = 'intento_rechazado';
 

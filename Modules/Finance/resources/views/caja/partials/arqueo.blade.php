@@ -39,7 +39,7 @@
 
 @if(!empty($a['pendientes']))
     <div style="padding: 10px 14px; border-radius: 10px; background: #FFFBEB; color: #92400E; margin-bottom: 12px;">
-        <strong>Transferencias y QR pendientes de verificación</strong> (no son efectivo; siguen en la conciliación):
+        <strong>Transferencias y QR pendientes de verificación</strong> (no son efectivo; se verifican en Finanzas › Pagos):
         <ul style="margin: 6px 0 0 18px;">
             @foreach($a['pendientes'] as $p)
                 <li>{{ $p['metodo'] }} · Bs. {{ $p['monto'] }} · ref. {{ $p['referencia'] ?? '—' }}</li>

@@ -16,8 +16,6 @@ class Alquiler extends Model
         'fecha_inicio',
         'fecha_fin_estimada',
         'fecha_devolucion',
-        'garantizado_con',
-        'monto_garantia',
         'total_estimado',
         'total_real',
         'estado',

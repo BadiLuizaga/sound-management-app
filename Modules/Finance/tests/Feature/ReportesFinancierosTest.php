@@ -8,7 +8,6 @@ use Illuminate\Support\Str;
 use Modules\Audit\Services\ReadOnlySqlGuard;
 use Modules\Finance\Http\Controllers\Admin\ReporteFinancieroController;
 use Modules\Finance\Models\Pago;
-use Modules\Finance\Models\Reembolso;
 use Modules\Finance\Services\CajaService;
 use Modules\Finance\Services\ReporteFinancieroService;
 use Modules\Finance\Support\Dinero;
@@ -121,53 +120,17 @@ class ReportesFinancierosTest extends TestCase
         $this->assertSame('Faltante', $filas[0][9]);
     }
 
-    public function test_conciliacion_de_pagos_detecta_cada_hallazgo(): void
+    public function test_no_hay_reportes_de_conciliacion_ni_de_reembolsos(): void
     {
-        $this->pago(MetodoPago::EFECTIVO, '10.00', 'recibido', now()->toDateTimeString(), ['estado_aplicacion' => 'requiere_revision', 'motivo_revision' => 'Sin stock']);
-        $this->pago(MetodoPago::QR, '20.00', 'pendiente_verificacion', null, ['referencia_externa' => 'QR-PEND-1']);
-        $verificando = $this->pago(MetodoPago::PAYPAL, '30.00', 'verificando', null, ['canal' => 'en_linea', 'referencia_externa' => 'ORDER-1']);
-        DB::table('pagos')->where('id', $verificando->id)->update(['updated_at' => now()->subHours(30)]);
+        $this->assertSame(['cobros_por_dia', 'cobros_por_usuario', 'diferencias', 'movimientos'], array_keys(ReporteFinancieroService::REPORTES));
 
-        // Venta presencial sin pago ligado (como las anteriores a la Etapa 2)
-        $this->abrirCaja($this->vendedor);
-        $this->producto(10, '50.00', 5);
-        $this->actingAs($this->vendedor)->postJson('/ventas', [
-            'ci_cliente' => $this->cliente()->ci,
-            'id_pago' => MetodoPago::idPorCodigo(MetodoPago::EFECTIVO),
-            'productos' => [['id' => 10, 'cantidad' => 1]],
-            'efectivo_recibido' => '50',
-            'clave_idempotencia' => 'pos-conciliacion-0001',
-        ])->assertOk();
-        $base = DB::table('NotaVenta')->first();
-        DB::table('NotaVenta')->insert([
-            'nro' => $base->nro + 1, 'fecha' => now(), 'total' => '12.00',
-            'ci_cliente' => $base->ci_cliente, 'ci_empleado' => $base->ci_empleado, 'id_pago' => $base->id_pago,
-        ]);
-
-        $hoy = now()->toDateString();
-        $hallazgos = array_column($this->generar('conciliacion_pagos', $hoy, $hoy)['filas'], 0);
-
-        $this->assertContains('Recibido sin venta (requiere revisión)', $hallazgos);
-        $this->assertContains('Pendiente de verificación', $hallazgos);
-        $this->assertContains('Verificando más de 24 h', $hallazgos);
-        $this->assertContains('Venta presencial sin pago ligado', $hallazgos);
-        $this->assertSame(1, count(array_keys($hallazgos, 'Venta presencial sin pago ligado')), 'la venta con pago no aparece');
-    }
-
-    public function test_conciliacion_de_reembolsos(): void
-    {
-        $pago = $this->pago(MetodoPago::EFECTIVO, '80.00', 'recibido', now()->toDateTimeString());
-        foreach ([['autorizado', null], ['completado', null], ['completado', 'efectivo']] as $i => [$estado, $medio]) {
-            Reembolso::create([
-                'uuid' => (string) Str::uuid(), 'clave_idempotencia' => 'rep-reemb-' . $i, 'pago_id' => $pago->id,
-                'estado' => $estado, 'origen' => 'aplicacion', 'monto' => '5.00', 'moneda' => 'BOB', 'motivo' => 'x',
-                'medio_devolucion' => $medio, 'completado_at' => $estado === 'completado' ? now() : null,
-            ]);
+        foreach (['conciliacion_pagos', 'conciliacion_reembolsos', 'reembolsos'] as $eliminado) {
+            $this->actingAs($this->admin)->get(route('finanzas.admin.reportes.index', ['reporte' => $eliminado]))->assertSessionHasErrors('reporte');
+            $this->actingAs($this->admin)->get(route('finanzas.admin.reportes.csv', ['reporte' => $eliminado]))->assertSessionHasErrors('reporte');
         }
-
-        $hallazgos = array_column($this->generar('conciliacion_reembolsos')['filas'], 0);
-
-        $this->assertSame(['Autorizado, falta entregar el dinero', 'Entregado sin caja ni medio registrados (anterior a la Etapa 3)'], $hallazgos);
+        $this->actingAs($this->admin)->get(route('finanzas.admin.reportes.index'))->assertOk()
+            ->assertDontSee('Conciliación')
+            ->assertDontSee('Reembolsos entregados');
     }
 
     public function test_csv_con_columnas_fijas_bom_y_sin_inyeccion_de_formulas(): void

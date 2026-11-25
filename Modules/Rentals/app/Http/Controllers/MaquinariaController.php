@@ -39,17 +39,16 @@ class MaquinariaController extends Controller
     {
         Gate::authorize('admin');
 
-        $request->validate([
+        $datos = $request->validate([
             'codigo' => ['required', 'string', 'max:50', 'unique:maquinarias,codigo'],
             'nombre' => ['required', 'string', 'max:100'],
             'descripcion' => ['nullable', 'string'],
             'precio_hora' => ['required', 'numeric', 'min:0'],
             'precio_dia' => ['required', 'numeric', 'min:0'],
-            'garantia_sugerida' => ['required', 'numeric', 'min:0'],
             'estado' => ['required', 'in:disponible,alquilado,mantenimiento'],
         ]);
 
-        $maquinaria = Maquinaria::create($request->all());
+        $maquinaria = Maquinaria::create($datos);
 
         Bitacora::registrar('INSERTAR', 'maquinarias', $maquinaria->id, "Se registró la maquinaria: {$maquinaria->nombre} con código {$maquinaria->codigo}");
 
@@ -66,17 +65,16 @@ class MaquinariaController extends Controller
     {
         Gate::authorize('admin');
 
-        $request->validate([
+        $datos = $request->validate([
             'codigo' => ['required', 'string', 'max:50', Rule::unique('maquinarias', 'codigo')->ignore($maquinaria->id)],
             'nombre' => ['required', 'string', 'max:100'],
             'descripcion' => ['nullable', 'string'],
             'precio_hora' => ['required', 'numeric', 'min:0'],
             'precio_dia' => ['required', 'numeric', 'min:0'],
-            'garantia_sugerida' => ['required', 'numeric', 'min:0'],
             'estado' => ['required', 'in:disponible,alquilado,mantenimiento'],
         ]);
 
-        $maquinaria->update($request->all());
+        $maquinaria->update($datos);
 
         Bitacora::registrar('ACTUALIZAR', 'maquinarias', $maquinaria->id, "Se actualizó la maquinaria: {$maquinaria->nombre} ({$maquinaria->codigo})");
 

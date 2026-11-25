@@ -64,14 +64,6 @@ class PayPalGateway implements PaymentGateway
         );
     }
 
-    public function reembolsarCaptura(string $captureId, Dinero $monto, string $requestId, string $nota): ResultadoReembolso
-    {
-        return $this->interpretarReembolso($this->cliente->enviar('POST', '/v2/payments/captures/' . rawurlencode($captureId) . '/refund', [
-            'amount' => ['value' => $monto->decimal(), 'currency_code' => $monto->moneda],
-            'note_to_payer' => mb_substr($nota, 0, 255),
-        ], $requestId));
-    }
-
     public function consultarReembolso(string $refundId): ResultadoReembolso
     {
         return $this->interpretarReembolso($this->cliente->enviar('GET', '/v2/payments/refunds/' . rawurlencode($refundId)));

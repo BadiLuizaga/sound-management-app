@@ -160,11 +160,11 @@
         </tr>
     </table>
 
-    <!-- Ficha de Fechas y Garantía -->
+    <!-- Ficha de Fechas y condiciones -->
     <table class="info-table">
         <tr>
             <th style="width: 50%;">Cronograma de Alquiler</th>
-            <th style="width: 50%;">Condiciones de Garantía</th>
+            <th style="width: 50%;">Condiciones</th>
         </tr>
         <tr>
             <td>
@@ -173,8 +173,10 @@
                 <strong>Fecha Devolución:</strong> {{ $alquiler->fecha_devolucion ? $alquiler->fecha_devolucion->format('d/m/Y H:i') : 'Pendiente de entrega' }}
             </td>
             <td>
-                <strong>Garantía Física:</strong> {{ $alquiler->garantizado_con }}<br>
-                <strong>Monto en Efectivo:</strong> {{ number_format($alquiler->monto_garantia, 2) }} Bs.<br>
+                @if($alquiler->garantizado_con || (float) $alquiler->monto_garantia > 0)
+                    {{-- Dato histórico: SOUND POS ya no gestiona garantías --}}
+                    <strong>Garantía (histórico):</strong> {{ $alquiler->garantizado_con }} · {{ number_format($alquiler->monto_garantia, 2) }} Bs.<br>
+                @endif
                 <strong>Observaciones:</strong> {{ $alquiler->observaciones ?? 'Ninguna' }}
             </td>
         </tr>
@@ -231,7 +233,7 @@
     <!-- Pie del comprobante -->
     <div class="footer">
         <p><strong>Ferretería Guisella - Confianza y Solidez en sus Proyectos</strong></p>
-        <p>Por favor conserve este documento. La devolución tardía de la maquinaria está sujeta a cargos adicionales. Al recibir la maquinaria de vuelta, se le reintegrará la garantía correspondiente.</p>
+        <p>Por favor conserve este documento.</p>
     </div>
 </div>
 
