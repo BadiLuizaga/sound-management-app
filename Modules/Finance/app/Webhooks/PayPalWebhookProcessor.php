@@ -4,6 +4,7 @@ namespace Modules\Finance\Webhooks;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Modules\Finance\Aplicadores\AplicadorReserva;
 use Modules\Finance\Enums\EstadoAplicacion;
 use Modules\Finance\Enums\EstadoPago;
 use Modules\Finance\Gateways\Resultados\ResultadoOrden;
@@ -204,6 +205,11 @@ class PayPalWebhookProcessor
                 $this->pagos->transicionar($p, 'revertido_webhook', EstadoPago::Revertido, $aplicacion, [
                     'motivo_revision' => 'PayPal revirtió el cobro (contracargo o reverso).',
                 ]);
+
+                // Etapa 4 — paso 4: un cobro revertido deja de contar para la reserva
+                if ($p->reserva_id !== null) {
+                    app(AplicadorReserva::class)->sincronizar((int) $p->reserva_id, 'PayPal revirtió el cobro', $p);
+                }
             }
         });
 

@@ -98,9 +98,12 @@ class PagoEnLineaController extends Controller
 
     private function estadoPublico(Pago $pago): array
     {
+        $destino = ($pago->snapshot['tipo'] ?? null) === PagoService::TIPO_RESERVA ? 'reserva' : 'compra';
+
         $mensaje = match (true) {
-            $pago->estado_aplicacion === EstadoAplicacion::Aplicado => 'Pago recibido y compra registrada.',
-            $pago->estado->dineroRecibido() => 'Pago recibido. Tu compra está en revisión; el personal se comunicará contigo.',
+            $pago->estado_aplicacion === EstadoAplicacion::Aplicado => $destino === 'reserva' ? 'Pago recibido y registrado en tu reserva.' : 'Pago recibido y compra registrada.',
+            $pago->estado->dineroRecibido() => "Pago recibido. Tu {$destino} está en revisión; el personal se comunicará contigo.",
+            $pago->estado === EstadoPago::Cancelado && $destino === 'reserva' => 'El pago no se completó porque la reserva ya no admite ese importe. No se realizó ningún cobro.',
             $pago->estado === EstadoPago::Verificando => 'Estamos confirmando tu pago con PayPal. No vuelvas a pagar.',
             $pago->estado === EstadoPago::OrdenCreada => 'Pago pendiente de aprobación en PayPal.',
             in_array($pago->estado, [EstadoPago::Fallido, EstadoPago::Expirado, EstadoPago::Cancelado], true) => 'El pago no se completó. No se realizó ningún cobro.',
@@ -112,6 +115,7 @@ class PagoEnLineaController extends Controller
             'estado' => $pago->estado->value,
             'estado_aplicacion' => $pago->estado_aplicacion->value,
             'nro_factura' => $pago->nro_factura,
+            'reserva_id' => $pago->reserva_id,
             'mensaje' => $mensaje,
             'resultado_url' => route('finanzas.pagos.resultado', $pago),
         ];

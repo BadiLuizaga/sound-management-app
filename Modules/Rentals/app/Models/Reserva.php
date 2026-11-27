@@ -120,4 +120,10 @@ class Reserva extends Model
     {
         return $this->hasMany(ReservaCargo::class, 'reserva_id');
     }
+
+    /** Etapa 4 — paso 4: pagos (anticipos y saldos) de la reserva. */
+    public function pagos()
+    {
+        return $this->hasMany(\Modules\Finance\Models\Pago::class, 'reserva_id')->orderBy('id');
+    }
 }

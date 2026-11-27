@@ -157,48 +157,72 @@ class PagoService
             throw new PagoNoDisponible('El importe a pagar no es válido.');
         }
 
+        $esReserva = ($snapshot['tipo'] ?? null) === self::TIPO_RESERVA;
+        if ($esReserva !== ($reservaId !== null)) {
+            throw new PagoNoDisponible('El pago de una reserva debe indicar la reserva (y solo ella).');
+        }
+
         $tasa = $disponibilidad['tasa'];
 
-        return DB::transaction(function () use ($usuario, $total, $snapshot, $claveIdempotencia, $reservaId, $tasa) {
-            $existente = Pago::where('clave_idempotencia', $claveIdempotencia)->lockForUpdate()->first();
-            if ($existente) {
-                if ((string) $existente->ci_usuario !== (string) $usuario->ci) {
-                    throw new PagoNoDisponible('La clave de idempotencia ya está en uso.');
+        try {
+            return DB::transaction(function () use ($usuario, $total, $snapshot, $claveIdempotencia, $reservaId, $tasa) {
+                // Etapa 4 — paso 4: la reserva se bloquea antes de buscar o crear el intento
+                if ($reservaId !== null) {
+                    app(AplicadorReserva::class)->bloquear($reservaId);
                 }
-                return $existente;
-            }
 
-            $proveedor = $this->tiposCambio->convertir($total, $tasa);
+                $existente = Pago::where('clave_idempotencia', $claveIdempotencia)->lockForUpdate()->first();
+                if ($existente) {
+                    if ((string) $existente->ci_usuario !== (string) $usuario->ci) {
+                        throw new PagoNoDisponible('La clave de idempotencia ya está en uso.');
+                    }
+                    return $existente;
+                }
 
-            $pago = Pago::create([
-                'uuid' => (string) Str::uuid(),
-                'clave_idempotencia' => $claveIdempotencia,
-                'canal' => Pago::CANAL_EN_LINEA,
-                'proveedor' => Pago::PROVEEDOR_PAYPAL,
-                'metodo_pago_id' => MetodoPago::idPorCodigo(MetodoPago::PAYPAL),
-                'estado' => EstadoPago::Iniciado,
-                'estado_aplicacion' => EstadoAplicacion::Pendiente,
-                'monto' => $total->decimal(),
-                'moneda' => 'BOB',
-                'monto_proveedor' => $proveedor->decimal(),
-                'moneda_proveedor' => $proveedor->moneda,
-                'tipo_cambio_id' => $tasa->id,
-                'tasa_aplicada' => $tasa->tasa,
-                'ci_usuario' => $usuario->ci,
-                'reserva_id' => $reservaId,
-                'snapshot' => $snapshot,
-                'expira_at' => now()->addMinutes((int) config('finance.expiracion_minutos', 30)),
-            ]);
+                if ($reservaId !== null) {
+                    // Sin sobrepago: el intento no puede superar el saldo disponible
+                    app(AplicadorReserva::class)->exigirCobrable($reservaId, $total);
+                }
 
-            $this->evento($pago, 'creado', [
-                'monto_bob' => $total->decimal(),
-                'monto_proveedor' => $proveedor->decimal() . ' ' . $proveedor->moneda,
-                'tasa' => (string) $tasa->tasa,
-                'fecha_tasa' => $tasa->fecha_aplicacion->toDateString(),
-            ], $usuario);
+                return $this->crearIntentoEnLinea($usuario, $total, $snapshot, $claveIdempotencia, $reservaId, $tasa);
+            }, $reservaId !== null ? 3 : 1);
+        } catch (AplicacionFallida $e) {
+            throw new PagoNoDisponible($e->getMessage());
+        }
+    }
 
-            return $pago;
-        });
+    private function crearIntentoEnLinea(Usuario $usuario, Dinero $total, array $snapshot, string $claveIdempotencia, ?int $reservaId, $tasa): Pago
+    {
+        $proveedor = $this->tiposCambio->convertir($total, $tasa);
+
+        $pago = Pago::create([
+            'uuid' => (string) Str::uuid(),
+            'clave_idempotencia' => $claveIdempotencia,
+            'canal' => Pago::CANAL_EN_LINEA,
+            'proveedor' => Pago::PROVEEDOR_PAYPAL,
+            'metodo_pago_id' => MetodoPago::idPorCodigo(MetodoPago::PAYPAL),
+            'estado' => EstadoPago::Iniciado,
+            'estado_aplicacion' => EstadoAplicacion::Pendiente,
+            'monto' => $total->decimal(),
+            'moneda' => 'BOB',
+            'monto_proveedor' => $proveedor->decimal(),
+            'moneda_proveedor' => $proveedor->moneda,
+            'tipo_cambio_id' => $tasa->id,
+            'tasa_aplicada' => $tasa->tasa,
+            'ci_usuario' => $usuario->ci,
+            'reserva_id' => $reservaId,
+            'snapshot' => $snapshot,
+            'expira_at' => now()->addMinutes((int) config('finance.expiracion_minutos', 30)),
+        ]);
+
+        $this->evento($pago, 'creado', [
+            'monto_bob' => $total->decimal(),
+            'monto_proveedor' => $proveedor->decimal() . ' ' . $proveedor->moneda,
+            'tasa' => (string) $tasa->tasa,
+            'fecha_tasa' => $tasa->fecha_aplicacion->toDateString(),
+        ], $usuario);
+
+        return $pago;
     }
 
     /**
@@ -254,6 +278,22 @@ class PagoService
 
             if ($p->estado->dineroRecibido()) {
                 return ['pago' => $p, 'llamar' => false]; // idempotente
+            }
+
+            // Etapa 4 — paso 4: antes de que el dinero se mueva, la reserva debe
+            // seguir admitiendo este cobro (estado y saldo, con la reserva bloqueada).
+            // Si ya no lo admite, la orden NO se captura: no hay cobro que devolver.
+            if ($p->estado === EstadoPago::OrdenCreada && $p->reserva_id !== null) {
+                try {
+                    app(AplicadorReserva::class)->exigirCobrable((int) $p->reserva_id, $p->importe(), (int) $p->id);
+                } catch (AplicacionFallida $e) {
+                    $this->transicionar($p, 'captura_cancelada_reserva', EstadoPago::Cancelado, EstadoAplicacion::NoAplica, [
+                        'motivo_rechazo' => Str::limit($e->getMessage(), 250, '…'),
+                    ], ['motivo' => $e->getMessage()], $usuario);
+                    Bitacora::registrar('PAGO_CANCELADO', 'pagos', (int) $p->id, "Pago {$p->uuid} no capturado: {$e->getMessage()}");
+
+                    return ['pago' => $p, 'llamar' => false];
+                }
             }
 
             return match ($p->estado) {
@@ -443,6 +483,11 @@ class PagoService
             $this->transicionar($p, 'aplicado_manual', null, EstadoAplicacion::AplicadoManual, ['aplicado_at' => now()], ['motivo' => $motivo], $usuario);
             Bitacora::registrar('PAGO_APLICADO_MANUAL', 'pagos', (int) $p->id, "Pago {$p->uuid} cerrado manualmente: {$motivo}");
 
+            // Un pago de reserva cerrado manualmente cuenta como aplicado: el estado de pago se recalcula
+            if ($p->reserva_id !== null) {
+                app(AplicadorReserva::class)->sincronizar((int) $p->reserva_id, 'pago cerrado manualmente: ' . $motivo, $p);
+            }
+
             return $p;
         });
     }
@@ -454,8 +499,10 @@ class PagoService
      *  - Efectivo y tarjeta: 'recibido' y la venta se genera en la MISMA transacción
      *    (si la venta falla, no se registra nada: el dinero no se cobró).
      *  - Transferencia y QR: 'pendiente_verificacion'; la venta se genera al verificar.
+     *  - Reserva (snapshot.tipo = reserva y datos.reserva_id, Etapa 4 — paso 4): la
+     *    reserva se bloquea al inicio y el cobro no puede superar su saldo disponible.
      *
-     * @param array{referencia?: ?string, efectivo_recibido?: ?string, clave_idempotencia: string} $datos
+     * @param array{referencia?: ?string, efectivo_recibido?: ?string, clave_idempotencia: string, reserva_id?: ?int} $datos
      */
     public function registrarPresencial(Usuario $cajero, string $codigoMetodo, Dinero $total, array $snapshot, array $datos): Pago
     {
@@ -489,7 +536,18 @@ class PagoService
 
         $requiereVerificacion = in_array($codigoMetodo, self::REQUIEREN_VERIFICACION, true);
 
-        return DB::transaction(function () use ($cajero, $metodoId, $total, $snapshot, $clave, $referencia, $efectivo, $cambio, $requiereVerificacion) {
+        $reservaId = isset($datos['reserva_id']) ? (int) $datos['reserva_id'] : null;
+        if ((($snapshot['tipo'] ?? null) === self::TIPO_RESERVA) !== ($reservaId !== null)) {
+            throw new \DomainException('El cobro de una reserva debe indicar la reserva (y solo ella).');
+        }
+
+        return DB::transaction(function () use ($cajero, $metodoId, $total, $snapshot, $clave, $referencia, $efectivo, $cambio, $requiereVerificacion, $reservaId) {
+            // Etapa 4 — paso 4: la reserva se bloquea primero; dos cobros simultáneos
+            // de la misma reserva se serializan aquí y el segundo ve el saldo real.
+            if ($reservaId !== null) {
+                app(AplicadorReserva::class)->bloquear($reservaId);
+            }
+
             $existente = Pago::where('clave_idempotencia', $clave)->lockForUpdate()->first();
             if ($existente) {
                 if ((string) $existente->ci_registrado_por !== (string) $cajero->ci) {
@@ -505,6 +563,11 @@ class PagoService
             $caja = Caja::where('user_id', $cajero->ci)->where('estado', 'abierta')->lockForUpdate()->first();
             if (!$caja) {
                 throw new \DomainException('Debes realizar la apertura de tu caja antes de registrar cobros.');
+            }
+
+            if ($reservaId !== null) {
+                // Sin sobrepago (cuenta también transferencias/QR pendientes de verificación)
+                app(AplicadorReserva::class)->exigirCobrable($reservaId, $total);
             }
 
             $pago = Pago::create([
@@ -523,6 +586,7 @@ class PagoService
                 'ci_usuario' => $snapshot['ci_cliente'] ?? null,
                 'ci_registrado_por' => $cajero->ci,
                 'caja_id' => $caja->id,
+                'reserva_id' => $reservaId,
                 'snapshot' => $snapshot,
                 'recibido_at' => $requiereVerificacion ? null : now(),
             ]);
@@ -538,7 +602,7 @@ class PagoService
             }
 
             return $pago;
-        });
+        }, $reservaId !== null ? 3 : 1);
     }
 
     /**

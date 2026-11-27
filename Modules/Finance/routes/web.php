@@ -5,6 +5,7 @@ use Modules\Finance\Http\Controllers\Admin\PagoController;
 use Modules\Finance\Http\Controllers\Admin\ReporteFinancieroController;
 use Modules\Finance\Http\Controllers\Admin\TipoCambioController;
 use Modules\Finance\Http\Controllers\PagoEnLineaController;
+use Modules\Finance\Http\Controllers\PagoReservaController;
 use Modules\Finance\Http\Controllers\PayPalWebhookController;
 
 // ─────────────────────────────────────────────────────────
@@ -21,6 +22,21 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->name('finanzas.pagos.estado');
     Route::get('/pagos/{pago}/resultado', [PagoEnLineaController::class, 'resultado'])
         ->name('finanzas.pagos.resultado');
+
+    // ─────────────────────────────────────────────────────
+    // Pagos de reservas (Etapa 4 — paso 4): anticipos y saldos
+    // ─────────────────────────────────────────────────────
+    // Estado de cuenta: titular o personal con acceso a reservas (control en el controlador)
+    Route::get('/reservas/{reserva}/estado-cuenta', [PagoReservaController::class, 'estadoCuenta'])
+        ->name('finanzas.reservas.estado-cuenta');
+    // En línea: solo el titular; la captura usa finanzas.paypal.captura
+    Route::post('/reservas/{reserva}/pagos/paypal', [PagoReservaController::class, 'pagarEnLinea'])
+        ->middleware('throttle:10,1')
+        ->name('finanzas.reservas.paypal.orden');
+    // En caja: exige la caja abierta del cajero
+    Route::post('/finanzas/reservas/{reserva}/cobros', [PagoReservaController::class, 'cobrarEnCaja'])
+        ->middleware('can:finance.payments.register')
+        ->name('finanzas.reservas.cobros.store');
 
     // ─────────────────────────────────────────────────────
     // Administración financiera (permisos finance.* por ruta)

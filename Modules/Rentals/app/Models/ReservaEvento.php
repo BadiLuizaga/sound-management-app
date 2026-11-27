@@ -20,6 +20,11 @@ class ReservaEvento extends Model
     public const CANCELADA = 'cancelada';
     public const EXPIRADA = 'expirada';
 
+    // Etapa 4 — paso 4 (pagos; nunca cambian el estado de la reserva)
+    public const PAGO_REGISTRADO = 'pago_registrado';
+    public const PAGO_APLICADO = 'pago_aplicado';
+    public const ESTADO_PAGO_ACTUALIZADO = 'estado_pago_actualizado';
+
     protected $table = 'reserva_eventos';
 
     protected $fillable = ['reserva_id', 'tipo', 'estado_anterior', 'estado_nuevo', 'ci_responsable', 'datos', 'ip'];
